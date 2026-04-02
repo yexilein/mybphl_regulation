@@ -1,0 +1,1725 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+---
+
+```{r}
+library(tidyverse)
+source("../../processed_data/processed_data.R", chdir=TRUE)
+```
+
+```{r}
+fig_dir = "Fig_multiome"
+dir.create(fig_dir, showWarnings = FALSE)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+# Full datasets
+<!-- #endregion -->
+
+```{r}
+eom = load_srt("eom_multiome", "all_adult")
+```
+
+```{r}
+eom$tissue = "EOM"
+```
+
+```{r}
+limb = load_srt("limb_multiome")
+```
+
+```{r}
+# do we need to cluster and annotate the full (myo + other) adult dataset -> not sure it’s worth it
+limb = limb[, limb$orig.ident == "Adult"]
+```
+
+```{r}
+limb$tissue = "Limb"
+```
+
+```{r}
+larynx = load_srt("larynx_multiome")
+```
+
+```{r}
+larynx$tissue = "Larynx"
+larynx$class = "Myonuclei"
+```
+
+## QC
+
+```{r}
+sample_order = c("EOM","Limb","Larynx")
+tissue_cols = c("EOM"="dodgerblue3","Limb"="darkorange","Larynx"="forestgreen")
+```
+
+```{r}
+metadata = bind_rows(eom[[]], limb[[]], larynx[[]]) |>
+    select(orig.ident, nFeature_RNA, nCount_RNA, nCount_ATAC, frip, pct_mt_rna, class, tissue) |>
+    mutate(sample_name = tissue) |>
+    mutate(sample_name = factor(sample_name, sample_order))
+```
+
+```{r}
+p1a = metadata |>
+    ggplot(aes(x=sample_name,y=nFeature_RNA)) +
+    geom_boxplot(aes(fill=tissue), show.legend = FALSE) +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="# genes detected") +
+    expand_limits(y = 0) +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    scale_fill_manual(values = tissue_cols)
+p1a
+```
+
+```{r}
+p1b = metadata |>
+    ggplot(aes(x=sample_name,y=pct_mt_rna)) +
+    geom_boxplot(aes(fill=tissue), show.legend = FALSE) +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="%MT reads") +
+    expand_limits(y = 0) +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    scale_fill_manual(values = tissue_cols)
+p1b
+```
+
+```{r}
+p2a = metadata |>
+    ggplot(aes(x=sample_name,y=nCount_ATAC)) +
+    geom_boxplot(aes(fill=tissue), show.legend = FALSE) +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="# ATAC fragments") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    scale_fill_manual(values = tissue_cols) +
+    scale_y_log10()
+p2a
+```
+
+```{r}
+p2b = metadata |>
+    ggplot(aes(x=sample_name,y=frip)) +
+    geom_boxplot(aes(fill=tissue), show.legend = FALSE) +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="% reads in peaks") +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    scale_fill_manual(values = tissue_cols)
+p2b
+```
+
+```{r}
+p3a = metadata |>
+    dplyr::count(sample_name, tissue) |>
+    ggplot(aes(x=sample_name,y=n)) +
+    geom_col(aes(fill=tissue), width=0.8, show.legend = FALSE) +
+    theme_classic(base_size = 16) +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    labs(x=NULL, y="# cells (after QC)")+
+    scale_fill_manual(values = tissue_cols)
+p3a
+```
+
+```{r}
+p3b = metadata |>
+    dplyr::count(sample_name,class) |>
+    complete(sample_name,class,fill = list(n=0)) |>
+    ggplot(aes(x=sample_name,y=n)) +
+    geom_col(aes(fill=class), position = "dodge") +
+    theme_classic(base_size = 16) +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    labs(x=NULL, y="# cells (after QC)")
+p3b
+```
+
+```{r}
+p = p1a|p1b|p2a|p2b|p3a|p3b
+p
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/qc.pdf"), width=60/3)
+```
+
+## UMAPs
+
+```{r}
+DimPlot(eom, label=TRUE, repel=TRUE) + NoAxes() + NoLegend()
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_full_eom.pdf"))
+```
+
+```{r}
+DimPlot(limb, label=TRUE, repel=TRUE) + NoAxes() + NoLegend()
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_full_limb.pdf"))
+```
+
+```{r}
+DimPlot(larynx, label=TRUE, repel=TRUE) + NoAxes() + NoLegend()
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_full_larynx.pdf"))
+```
+
+## Annotation
+
+```{r}
+sort(levels(eom))
+```
+
+```{r}
+# markers used for annotation
+marker_eom = list(
+    "Myonuclei" = c("Ttn","Obscn","Myh3","Myh8","Myh1","Myh2","Myh4","Myh13","Myh7","Myh15"),
+    "MTJ" = c("Col22a1","Col24a1","Fras1"),
+    "NMJ" = c("Col19a1","Etv5","Chrne"),
+    #"MuSC" = c("Pax7","Chodl","Fgfr4","Calcr"),
+    
+    "FAPS" = c("Dcn","Tnxb","Lvrn","Pdgfra"),
+    "FAPS types" = c("Csmd1","Gfpt2","Gfra1"),
+    #"FAPS-like type" = c("Nebl","Ildr2","Foxd1","Tenm2"),
+    "Tenocytes" = c("Col12a1","Col11a1","Thbs4","Mmp13"),
+    
+    "SMC" = c("Myh11","Il34","Myocd","Col4a6"),
+    "Endothelial" = c("Flt1","Adgrf5","Aqp1","Vwf"),
+    "Pericytes" = c("Reln","Mmrn1","Ccl21a","Flt4"),
+    "Immune" = c("Dock2","F13a1","Ccr2","Ikzf3"),
+    #"Microglia" = c("Lair1","Csf3r","Siglech","Selplg"),
+    
+    "Oligo" = c("Mag","Mog","Mobp","Bcas1"),
+    "OPC/Neurons" = c("Pdgfra","Bcas1","Rims2"),
+    #"Neurons" = c("Snap25","Syt1","Slc17a6","Slc17a7"),
+    "Astro" = c("Adgrv1","Arhgef4","Rfx4","Gfap"),
+    "Schwann" = c("Cdh19","Slc35f1","Grik2","Chl1"),
+    
+    "Adipo" = c("Acvr1c","Ankef1","Plin1","Cidec"),
+    "Melanocytes" = c("Dct","Tyr","Gucy2f","Tyrp1")
+    #"Pax6 Meis2" = c("Pax6","Meis2","Rbm47","Sntb1"),
+    #"HG" = c("Cyp2b19","Dgat2l6","Mogat1","Scd3"),
+    #"HG Immune" = c("Slc27a2","Mfsd2a","Cartpt","Pck1")
+    #"Cycling" = c("Mki67","Top2a")
+)
+eom_order = c(
+    'Myonuclei Myh2 Pcdh15','Myonuclei Myh1/Myh4', 'Myonuclei/NMJ Myh7',
+    'MTJ','NMJ',
+    'FAPS', 'FAPS-like Foxd1', 'FAPS-like Tenm2', 'Tenocytes (unclear)',
+    'SMC','Endothelial/pericytes/immune',
+    'Oligodendrocytes','Astrocytes','Schwann',
+    'Adipocytes','Melanocytes'
+)
+```
+
+```{r}
+levels(eom) = rev(eom_order)
+p_eom = DotPlot(eom, features = as.vector(unique(unlist(marker_eom))), scale=TRUE)
+```
+
+```{r}
+options(repr.plot.width = 60/3)
+p_eom + theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_size_area() + labs(x=NULL,y=NULL)
+options(repr.plot.width = 20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/dotplot_full_eom.pdf"), width = 60/3)
+```
+
+```{r}
+sort(levels(limb))
+```
+
+```{r}
+# markers used for annotation
+marker_ta = list(
+    "Myonuclei" = c("Ttn","Obscn","Myh1","Myh2","Myh4","Myh7","Myh15"),
+    "MTJ" = c("Col22a1","Col24a1","Fras1"),
+    "NMJ" = c("Col19a1","Etv5","Chrne"),
+    "Myoblasts"=c("Myog","Mymx"),
+    "MuSC" = c("Pax7","Chodl","Fgfr4","Calcr"),
+    
+    "FAPS" = c("Dcn","Tnxb","Lvrn","Pdgfra"),
+    "FAPS types" = c("Csmd1","Gfpt2","Gfra1"),
+    #"FAPS-like type" = c("Nebl","Ildr2","Foxd1","Tenm2"),
+    "Tenocytes" = c("Col12a1","Col11a1","Thbs4","Mmp13"),
+    #"Cycling" = c("Mki67","Top2a"),
+    
+    "SMC" = c("Myh11","Il34","Myocd","Col4a6"),
+    "Endothelial" = c("Flt1","Adgrf5","Aqp1","Vwf"),
+    "Pericytes" = c("Reln","Mmrn1","Ccl21a","Flt4"),
+    "Immune" = c("Dock2","F13a1","Ccr2","Ikzf3"),
+
+    #"Schwann" = c("Cdh19","Slc35f1","Grik2","Chl1"),
+    "Adipo" = c("Acvr1c","Ankef1","Plin1","Cidec")
+)
+ta_order = c(
+    'Myonuclei Myh1/Myh2 (Adult)','Myonuclei Myh4 (Adult)','Myonuclei Myh7',
+    'MTJ','NMJ','MuSC',
+    'FAPS/Tenocytes',
+    'SMC','Endothelial/pericytes','Immune',
+    'Adipocytes'
+)
+```
+
+```{r}
+levels(limb) = rev(ta_order)
+p_ta = DotPlot(limb, features = as.vector(unlist(marker_ta)), scale=TRUE)
+```
+
+```{r}
+options(repr.plot.width = 50/3)
+p_ta + theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_size_area() + labs(x=NULL,y=NULL)
+options(repr.plot.width = 20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/dotplot_full_limb.pdf"), width = 50/3)
+```
+
+```{r}
+sort(levels(larynx))
+```
+
+```{r}
+# markers used for annotation
+marker_larynx = list(
+    "Myonuclei" = c("Ttn","Obscn","Myh1","Myh2","Myh4","Myh13","Myh7","Myh15"),
+    "Myo subtypes" = c("Cpeb1","Rp1","Barx2","Grm1","Cdh22","Mybphl","Mybpc2","Pcdh7","Wdfy4"),
+    "MTJ" = c("Col22a1","Col24a1","Fras1"),
+    "NMJ" = c("Col19a1","Etv5","Chrne"),
+    "MuSC" = c("Pax7","Chodl","Fgfr4","Gulp1","Tshz3"),
+    "Unclear"=c("Myh8","Ebf1","Myom2","Lrmda","Myo1d","Myof","Sox5")
+)
+larynx_order = c(
+    'Myh1','Myh2','Myh4/Cpeb1','Myh4/Rp1/Barx2',
+    'Myh13/Grm1/Cdh22','Myh13/Mybphl/Pcdh7','Myh13/Mybphl/Wdfy4',
+    'MTJ','NMJ',
+    'Gulp1/Tshz3/Pax7 (MuSC?)',
+    'Myh8/Ebf1','Myom2/Lrmda/Mybpc2',
+    'Myo1d/Myof/Sox5'
+)
+```
+
+```{r}
+levels(larynx) = rev(larynx_order)
+p_larynx = DotPlot(larynx, features = as.vector(unlist(marker_larynx)), scale=TRUE)
+```
+
+```{r}
+options(repr.plot.width = 40/3)
+p_larynx + theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_size_area() + labs(x=NULL,y=NULL)
+options(repr.plot.width = 20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/dotplot_full_larynx.pdf"), width = 30/3)
+```
+
+# Myonuclei datasets
+
+```{r}
+smooth_data = function(srt, assay_name="RNA", layer="data", graph_name=paste0(assay_name, "_nn"), features=NULL, normalize_by_row=TRUE) {
+    expr = SeuratObject::LayerData(srt, assay=assay_name, layer=layer)
+    if (!is.null(features)) {
+        expr = expr[features,,drop=FALSE]
+    }
+    knn = Graphs(srt, graph_name)[colnames(expr),colnames(expr)]
+    # /!\ not symmetric -> by default, row 1 = 20 neighbors of cell 1, etc.
+    # cell = average of its neighbors -> normalize by row (overrepresentation of well-connected cells)
+    # cell = propagated equally to its neighbors -> normalize by column (conservation of overall content)
+    # each is considered to be its own neighbor (good!)
+    knn = as(knn, "dgCMatrix")
+    if (normalize_by_row) {
+        knn = knn / rowSums(knn)
+    } else {
+        knn = knn / colSums(knn)
+    }
+    # S = expr.t(knn) = tcrossprod(expr,knn)
+    result = Matrix::tcrossprod(expr,knn)
+    return(result)
+}
+```
+
+## Load data
+
+```{r}
+eom = load_srt("eom_multiome","myo_adult")
+```
+
+```{r}
+eom$tissue = "EOM"
+eom$stage = eom$orig.ident
+```
+
+```{r}
+#smooth_chromvar = smooth_data(eom, assay_name = "chromvar", graph_name = "RNA_nn")
+#eom[["chromvar"]] = CreateAssayObject(smooth_chromvar)
+```
+
+```{r}
+limb = load_srt("limb_multiome","myo_adult")
+```
+
+```{r}
+limb$tissue = "Limb"
+```
+
+```{r}
+larynx = load_srt("larynx_multiome")
+```
+
+```{r}
+larynx$tissue = "Larynx"
+larynx$class = "Myonuclei"
+```
+
+## Load GRN results
+
+```{r}
+analysis_dir = "../comparative_analysis"
+```
+
+```{r}
+mc = readRDS(glue::glue("{analysis_dir}/srt/all_metacell.rds"))
+```
+
+```{r}
+range(mc$n_cells)
+```
+
+```{r}
+mc = mc[, mc$n_cells >= 5] # remove noisy metacells
+```
+
+```{r}
+Idents(mc) = "tissue"
+```
+
+```{r}
+all_tfs = scan(glue::glue("{analysis_dir}/data/tf_list.txt"), what = "string")
+```
+
+```{r}
+grn = read_csv(glue::glue("{analysis_dir}/results/mybp_regulators.csv.gz"), show_col_types = FALSE)
+```
+
+```{r}
+regulon_df = read_csv(glue::glue("{analysis_dir}/results/pando/metacell_regulons.csv"), show_col_types = FALSE)
+```
+
+```{r}
+chromvar = readRDS(glue::glue("{analysis_dir}/srt/all_chromvar.rds"))
+```
+
+```{r}
+eom[["chromvar"]] = subset(chromvar[, chromvar$tissue == "eom"], cells = colnames(eom))[["chromvar"]]
+limb[["chromvar"]] = subset(chromvar[, chromvar$tissue == "limb"], cells = colnames(limb))[["chromvar"]]
+cv = chromvar[, chromvar$tissue == "larynx"]
+colnames(cv) = gsub("\\.1$", "", colnames(cv))
+larynx[["chromvar"]] = subset(cv, cells = colnames(larynx))[["chromvar"]]
+```
+
+```{r}
+eom[["chromvar"]] = CreateAssayObject(smooth_data(eom, assay_name = "chromvar", graph_name = "RNA_nn"))
+limb[["chromvar"]] = CreateAssayObject(smooth_data(limb, assay_name = "chromvar", graph_name = "RNA_nn"))
+larynx[["chromvar"]] = CreateAssayObject(smooth_data(larynx, assay_name = "chromvar", graph_name = "RNA_nn"))
+```
+
+```{r}
+rm(chromvar)
+```
+
+```{r}
+eom[["regulon"]] = readRDS(glue::glue("{analysis_dir}/srt/eom_regulons.rds"))
+limb[["regulon"]] = readRDS(glue::glue("{analysis_dir}/srt/limb_regulons.rds"))
+larynx[["regulon"]] = readRDS(glue::glue("{analysis_dir}/srt/larynx_regulons.rds"))
+```
+
+```{r}
+top_regulons = read_csv(glue::glue("{analysis_dir}/results/pando/metacell_top_regulons.csv"), show_col_types = FALSE)
+```
+
+```{r}
+gc()
+```
+
+## Define broad clusters
+
+```{r}
+ct_colors = c(
+    "Other/Immature"="gray80",
+    Myh1="#A0CB8D", Myh4="#3FAB6E", MTJ="#E58634", NMJ="#4C67AC",Myh3="#DDAE51", Myh7b="#529899",Myh2="darkgreen"
+)
+```
+
+```{r}
+table(eom$cell_type)
+```
+
+```{r}
+eom$broad_type = eom$cell_type
+eom$broad_type[eom$cell_type == "Olfml2a"] = "Other/Immature"
+Idents(eom) = "broad_type"
+levels(eom) = names(ct_colors)
+```
+
+```{r}
+table(limb$cell_type)
+```
+
+```{r}
+limb$broad_type = limb$cell_type
+limb$broad_type[limb$cell_type == "MuSC"] = "Other/Immature"
+Idents(limb) = "broad_type"
+levels(limb) = names(ct_colors)
+```
+
+```{r}
+table(larynx$cell_type)
+```
+
+```{r}
+larynx$broad_type = "Other/Immature"
+larynx$broad_type[larynx$cell_type == "Myh1"] = "Myh1"
+larynx$broad_type[larynx$cell_type == "Myh2"] = "Myh2"
+larynx$broad_type[larynx$cell_type == "MTJ"] = "MTJ"
+larynx$broad_type[larynx$cell_type == "NMJ"] = "NMJ"
+larynx$broad_type[grepl("Myh4",larynx$cell_type)] = "Myh4"
+larynx$broad_type[grepl("Myh13",larynx$cell_type)] = "Myh4" # should this be in a separate category?
+Idents(larynx) = "broad_type"
+levels(larynx) = names(ct_colors)
+```
+
+## UMAPs
+
+```{r}
+DimPlot(eom, cols = ct_colors) & NoAxes()
+ggsave(glue::glue("{fig_dir}/umap_myo_eom.pdf"))
+```
+
+```{r}
+DimPlot(limb, cols = ct_colors) & NoAxes()
+ggsave(glue::glue("{fig_dir}/umap_myo_limb.pdf"))
+```
+
+```{r}
+DimPlot(larynx, cols = ct_colors) & NoAxes()
+ggsave(glue::glue("{fig_dir}/umap_myo_larynx.pdf"))
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## UMAP with key markers
+<!-- #endregion -->
+
+```{r}
+expr_pal = c("gray90",RColorBrewer::brewer.pal(n=11, "RdYlBu")[c(5,2)])
+```
+
+```{r}
+my_genes = c("Mybphl","Myh4")
+#my_genes = c("Mybphl","Myh4","Myh1", "Maf", "Mafb","Myh13")
+p = lapply(my_genes, function(g) {
+    result = FeaturePlot(eom, g) / FeaturePlot(limb, g) / FeaturePlot(larynx, g)
+    max_value = max(sapply(list(eom, limb, larynx), \(srt) max(FetchData(srt, g))))
+    result = result & NoAxes() & scale_color_gradientn(colours = expr_pal, limits = c(0, max_value))
+})
+p = patchwork::wrap_plots(p, nrow = 1)
+options(repr.plot.width=20/3*length(my_genes), repr.plot.height=60/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_myo_mybphl_myh4.pdf"), width = 40/3, height = 60/3)
+```
+
+```{r}
+my_genes = c("Tbx15","Maf","Mafb")
+p = lapply(my_genes, function(g) {
+    result = FeaturePlot(eom, g) / FeaturePlot(limb, g) / FeaturePlot(larynx, g)
+    max_value = max(sapply(list(eom, limb, larynx), \(srt) max(FetchData(srt, g))))
+    result = result & NoAxes() & scale_color_gradientn(colours = expr_pal, limits = c(0, max_value))
+})
+p = patchwork::wrap_plots(p, nrow = 1)
+options(repr.plot.width=20/3*length(my_genes), repr.plot.height=60/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_myo_tbx15_maf.pdf"), width = 20/3*length(my_genes), height = 60/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## ChromVAR UMAP
+<!-- #endregion -->
+
+```{r}
+expr_pal = c("gray90",RColorBrewer::brewer.pal(n=11, "RdYlBu")[c(5,2)])
+```
+
+```{r}
+chromvar_pal = c("gray90",RColorBrewer::brewer.pal(n=9, "Blues")[c(6,9)])
+```
+
+```{r}
+my_genes = c("Mybphl", "Tbx15", ConvertMotifID(eom, assay = "ATAC", "TBX15"))
+min_cutoff = c(0,3.2,0)
+max_cutoff = c(2,5,1)
+cols = list(expr_pal, expr_pal, chromvar_pal)
+p = lapply(seq_along(my_genes), function(i) {
+    g = my_genes[i]
+    result = FeaturePlot(eom, g, min.cutoff=min_cutoff[i], max.cutoff=max_cutoff[i]) /
+        FeaturePlot(limb, g, min.cutoff=min_cutoff[i], max.cutoff=max_cutoff[i]) /
+        FeaturePlot(larynx, g, min.cutoff=min_cutoff[i], max.cutoff=max_cutoff[i])
+    max_value = min(max(sapply(list(eom, limb, larynx), \(srt) max(FetchData(srt, g)))), max_cutoff[i], na.rm = TRUE)
+    result = result & NoAxes() & scale_color_gradientn(colours = cols[[i]], limits = c(min_cutoff[i], max_value))
+})
+p = patchwork::wrap_plots(p, nrow = 1)
+options(repr.plot.width=20/3*length(my_genes), repr.plot.height=60/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/umap_myo_chromvar_tbx15.pdf"), width = 60/3, height = 60/3)
+```
+
+## Coverage plots
+
+```{r}
+cache_file = "combined_atac.rds"
+force_recompute=FALSE
+if (!file.exists(cache_file) | force_recompute) {
+    # combine cell types of interest as a single Seurat/Signac object to ensure proper visual scaling of the coverage plots
+    coi = c("Myh1","Myh2","Myh3","Myh4")
+    sub_eom = eom[, Idents(eom) %in% coi]
+    sub_limb = limb[, Idents(limb) %in% coi]
+    sub_larynx = larynx[, Idents(larynx) %in% coi]
+    
+    # we don’t care about the peak matrix (we’ll recompute it later) -> remove to speed up the combination of objects
+    sub_eom[["ATAC"]] = subset(sub_eom[["ATAC"]], features = rownames(sub_eom[["ATAC"]])[1])
+    sub_limb[["ATAC"]] = subset(sub_limb[["ATAC"]], features = rownames(sub_limb[["ATAC"]])[1])
+    sub_larynx[["ATAC"]] = subset(sub_larynx[["ATAC"]], features = rownames(sub_larynx[["ATAC"]])[1])
+
+    # this takes long because it’s checking the integrity of fragment files
+    combined = merge(x = sub_eom, y=list(sub_limb, sub_larynx))
+    combined = JoinLayers(combined)
+    Idents(combined) = paste(combined$tissue, combined$broad_type)
+
+    rm(sub_eom, sub_limb, sub_larynx); gc()    
+    saveRDS(combined, cache_file)
+}
+combined = readRDS(cache_file)
+```
+
+```{r}
+# define ATAC-specific cell-types for coverage plots 
+atac_type = paste(combined$tissue, combined$broad_type)
+atac_type[atac_type %in% c("EOM Myh1","EOM Myh2","EOM Myh4")] = "EOM Myh1+Myh2+Myh4"
+#atac_type[atac_type %in% c("Larynx Myh1","Larynx Myh2")] = "Larynx Myh1+Myh2"
+#atac_type[atac_type %in% c("Limb Myh1","Limb Myh2")] = "Limb Myh1+Myh2"
+Idents(combined) = atac_type
+# colors for each track (TO BE MODIFIED)
+coverage_colors = c(
+    "EOM Myh3" = ct_colors[["Myh1"]], "EOM Myh1+Myh2+Myh4" = ct_colors[["Myh4"]],
+    "Limb Myh1" = ct_colors[["Myh1"]], "Limb Myh2" = ct_colors[["Myh2"]], "Limb Myh4" = ct_colors[["Myh4"]],
+    #"Limb Myh1" = ct_colors[["Myh1"]], "Limb Myh4" = ct_colors[["Myh4"]],
+    "Larynx Myh1" = ct_colors[["Myh1"]], "Larynx Myh2" = ct_colors[["Myh2"]], "Larynx Myh4" = ct_colors[["Myh4"]]
+    #"Larynx Myh1+Myh2" = ct_colors[["Myh1"]], "Larynx Myh4" = ct_colors[["Myh4"]]
+)
+# determine order of tracks
+levels(combined) = names(coverage_colors)
+```
+
+```{r}
+my_target = "Mybphl"
+my_tfs = c("Tbx15","Maf","Mafb")
+```
+
+### Helper functions
+
+```{r}
+total_coverage = function(my_peaks) {
+    gr = StringToGRanges(my_peaks)
+    c = GenomicRanges::seqnames(gr)[1]
+    m = min(IRanges::start(gr))
+    M = max(IRanges::end(gr))
+    return(glue::glue("{c}-{m}-{M}"))
+}
+```
+
+```{r}
+make_link_object = function(ccres, my_target) {
+    tss_pos = Signac:::GetTSSPositions(Annotation(combined[["ATAC"]]))
+    tss_pos = setNames(GRangesToString(tss_pos), tss_pos$gene_name)
+    my_links = ccres |>
+        select(Peak2 = peak, coaccess = zscore) |>
+        distinct() |>
+        mutate(Peak1 = tss_pos[my_target], .before = "Peak2")
+    result = combined[["ATAC"]]
+    Links(result) = ConnectionsToLinks(my_links)
+    return(result)
+}
+```
+
+```{r}
+my_cov_plot = function(results, my_gene, my_tfs, show_links=TRUE, extend_by=1000) {
+    my_peaks = results |> pull(peak) |> unique()
+    roi = StringToGRanges(total_coverage(my_peaks))
+    roi = Extend(roi, upstream = extend_by, downstream = extend_by)
+    roi = GRangesToString(roi)
+
+    # basic tracks
+    p1 = CoveragePlot(combined, assay="ATAC", roi, region.highlight = StringToGRanges(my_peaks), peaks = FALSE, annotation = FALSE)
+    p1b = ExpressionPlot(combined, features = c(my_gene, my_tfs))
+
+    # binding sites for TF of interest
+    p2 = lapply(my_tfs, function(tf_name) {
+        binding_sites = results |> filter(tf == tf_name, !is.na(motif_score)) |> pull(peak)
+        empty_srt = CreateSeuratObject(
+            CreateChromatinAssay(counts = matrix(0, length(my_peaks)+1, 2, dimnames = list(c(my_peaks,"chr1-0-0"),c("mi","mou")))), assay="ATAC"
+        )
+        empty_srt[["ATAC"]][[tf_name]] = rownames(empty_srt) %in% binding_sites
+        PeakPlot(empty_srt, assay="ATAC", roi, group.by = tf_name) +
+            scale_color_manual(values = c("TRUE"="brown2","FALSE"="gray80")) +
+            guides(col = "none") +
+            labs(y=tf_name) +
+            theme(axis.title.y = element_text(angle=0, vjust=0.5))
+    })
+    p2 = CombineTracks(p2, heights = rep(1, length(p2)))
+
+    # gene positions
+    p3 = AnnotationPlot(eom[["ATAC"]], roi)
+
+    # links to cCREs
+    if (show_links) {
+        links = make_link_object(results, my_gene)
+        p4 = LinkPlot(links, roi, scale.linewidth = TRUE, min.cutoff = 0)
+    }
+
+    # combine plots
+    if (show_links) {
+        p = CombineTracks(list(p1,p2,p3,p4), expression.plot = p1b, widths=c(10,length(my_tfs)+1), heights = c(10,length(my_tfs)/4,2,2))
+    } else {
+        p = CombineTracks(list(p1,p2,p3), expression.plot = p1b, widths=c(10,length(my_tfs)+1), heights = c(10,length(my_tfs)/4,2))
+    }
+    return(p)
+}
+```
+
+```{r}
+find_motif_position = function(tf, peaks, p.cutoff=1e-3, genome = BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10) {
+    jaspar = readRDS("jaspar2024.rds")
+    pfm=jaspar[sapply(jaspar, \(p) p@name) %in% c(tf, toupper(tf))]
+    result = motifmatchr::matchMotifs(pwms = pfm, subject = StringToGRanges(peaks), out="position", genome = genome, bg="genome", p.cutoff=p.cutoff)
+    result = lapply(result, add_peak_info, peaks)
+    result = bind_rows(lapply(result, as_tibble), .id = "motif")
+    if (nrow(result) > 0) {
+        result$pval = score_to_pval(pfm, result$score)
+    }
+    result = GenomicRanges::GRanges(result)
+    result = sort(result, ignore.strand=TRUE)
+    return(result)
+}
+
+add_peak_info = function(gr, peaks) {
+    gr$peak = NA
+    for (my_peak in peaks) {
+        is_in_peak = IRanges::overlapsAny(gr, StringToGRanges(my_peak))
+        if (sum(is_in_peak) > 0) {
+            gr[is_in_peak]$peak = my_peak
+        }
+    }
+    return(gr)
+}
+
+# /!\ only tested with 1 TF, likely to fail if multiple TFs/PFMs provided
+score_to_pval = function(pfm, score) {
+    pwms = do.call(TFBSTools::PWMatrixList, lapply(pfm, TFBSTools::toPWM))
+    bg = motifmatchr:::get_bg(bg_method="genome", subject=NULL, genome=BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10)
+    motif_mats = motifmatchr:::convert_pwms(pwms, bg)
+    my_pval = sort(c(c(1:9)*10**(-3), c(1:9)*10**(-4), c(1:9)*10**(-5)))
+    pvals = tibble(
+        pval = my_pval,
+        score = sapply(my_pval, \(p) { motifmatchr:::get_thresholds(mats = motif_mats, nuc_freqs = bg, p)[1] })
+    )
+    result = sapply(score, \(s) { pvals$pval[which(pvals$score<s)[1]] })
+    return(result)
+}
+```
+
+### Coverage - all peaks
+
+```{r}
+top_peaks = filter(grn, target == my_target) |> arrange(peak)
+```
+
+```{r}
+p_track = my_cov_plot(top_peaks, my_target, my_tfs)
+```
+
+```{r}
+# redefine broad cell types according to what needs to be shown
+# also define how to treat what is not shown -> instead of removing, maybe pool into a line labeled "Other" to provide a baseline of coverage and expression?
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_prefilter.pdf"), width = 60/3, height = 30/3)
+```
+
+### Coverage - proximal peaks
+
+```{r}
+unique(top_peaks$gene_distance)
+unique(top_peaks$tss_distance)
+```
+
+```{r}
+# too many candidates -> need to refine later to keep interesting ones
+proximal_peaks = filter(top_peaks, gene_distance<2e4, gene_distance == tss_distance | gene_distance == 0)
+```
+
+```{r}
+names(proximal_peaks)
+```
+
+```{r}
+proximal_peaks |>
+    select(peak, peak_score=score, peak_zscore=zscore, pct_peak, tissue,
+           tf, motif, motif_score,
+           tf_peak_pooled, tf_peak_within, tf_target_pooled, tf_target_within) |>
+    arrange(peak, desc(tf_peak_pooled)) |>
+    write_csv("mybphl_regulators.csv")
+```
+
+```{r}
+p_track = my_cov_plot(proximal_peaks, my_target, my_tfs)
+```
+
+```{r}
+# redefine broad cell types according to what needs to be shown
+# also define how to treat what is not shown -> instead of removing, maybe pool into a line labeled "Other" to provide a baseline of coverage and expression?
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_proximal.pdf"), width = 60/3, height = 30/3)
+```
+
+```{r}
+tbx_motifs = find_motif_position("Tbx15", peaks = unique(proximal_peaks$peak), p.cutoff = 1e-3)
+```
+
+```{r}
+e=50 # extend visualization by e bp on each side of the peak (0 by default)
+w=100 # size of window for smoothing of cut sites (100 by default)
+p = lapply(unique(proximal_peaks$peak), function(my_peak) {
+    motif_pos = IRanges::mid(tbx_motifs[tbx_motifs$peak == my_peak])
+    r = CoveragePlot(combined, assay="ATAC", region = my_peak, peaks = FALSE, annotation = FALSE, extend.upstream = e, extend.downstream = e, window = w)
+    r = r + geom_vline(xintercept = motif_pos, color="gray20")
+    r = r + scale_fill_manual(values = coverage_colors)  # cell type colors
+    r = r + theme_void() + theme(strip.text = element_blank()) + labs(title = my_peak) + guides(fill="none")
+})
+p = patchwork::wrap_plots(p)
+```
+
+```{r}
+options(repr.plot.width = 30/3, repr.plot.height=30/3)
+p
+options(repr.plot.width = 20/3, repr.plot.height=20/3)
+```
+
+```{r}
+as_tibble(tbx_motifs) |> write_csv(glue::glue("{fig_dir}/coverage_mybphl_tbx_motifs.csv"))
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_tbx_motifs.pdf"), width = 30/3, height = 30/3)
+```
+
+```{r}
+MotifPlot(eom, assay="ATAC", ConvertMotifID(eom[["ATAC"]], "TBX15"))
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_tbx15_motif_pwm_logo.pdf"))
+```
+
+```{r}
+my_peaks = unique(proximal_peaks$peak)
+accessibility = t(FeatureMatrix(Fragments(combined[["ATAC"]]), features = my_peaks))
+```
+
+```{r}
+cells_by_group = as.vector(table(Idents(combined)))
+to_plot = tibble(
+    group = rep(levels(combined), length(my_peaks)),
+    peak = rep(my_peaks, each=nlevels(combined)),
+    avg = c(rowsum(accessibility, group = Idents(combined)) / cells_by_group),
+    pct = c(rowsum(1*(accessibility>0), group = Idents(combined)) / cells_by_group)
+)
+to_plot |>
+    ggplot(aes(x=peak,y=group)) +
+    geom_point(aes(size=pct, color=group)) +
+    theme_classic(base_size = 16) +
+    scale_radius(range = c(0,10)) +
+    scale_color_manual(values = coverage_colors) +
+    guides(color="none") +
+    labs(x=NULL,y=NULL,size="% cells") +
+    #scale_size_area(max_size = 10) +
+    theme(axis.text.x = element_text(angle=45,hjust=1))
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_dotplot.pdf"))
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+### Coverage - distal peaks
+<!-- #endregion -->
+
+```{r}
+# too many candidates -> need to refine later to keep interesting ones
+distal_upstream_peaks = filter(top_peaks, gene_distance>2e4, gene_distance == tss_distance, zscore>2 | score>0.05, pct_peak<0.15)
+```
+
+```{r}
+p_track = my_cov_plot(distal_upstream_peaks, my_target, my_tfs)
+```
+
+```{r}
+# redefine broad cell types according to what needs to be shown
+# also define how to treat what is not shown -> instead of removing, maybe pool into a line labeled "Other" to provide a baseline of coverage and expression?
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybphl_distal_upstream.pdf"), width = 60/3, height = 30/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## Top TF candidates - proximal peaks
+<!-- #endregion -->
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_within_mybphl_proximal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_motif_mybphl_proximal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+all_peaks = sort(unique(proximal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_peak_mybphl_vs_tbx15_proximal.pdf"), width = ncol*15/3, height = nrow*15/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_peak_mybphl_vs_maf_proximal.pdf"), width = ncol*15/3, height = nrow*15/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## Top TF candidates - distal peaks (not super interesting)
+<!-- #endregion -->
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = distal_upstream_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Distal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_within_mybphl_distal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = distal_upstream_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_motif_mybphl_distal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+all_peaks = sort(unique(distal_upstream_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#ggsave(glue::glue("{fig_dir}/regulators_scatter_peak_mybphl_vs_tbx15_distal.pdf"), width = ncol*15/3, height = nrow*15/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#ggsave(glue::glue("{fig_dir}/regulators_scatter_peak_mybphl_vs_maf_distal.pdf"), width = ncol*15/3, height = nrow*15/3)
+```
+
+## Mybpc1
+
+```{r}
+my_target = "Mybpc1"
+my_tfs = c("Tbx15","Maf","Ppara")
+```
+
+```{r}
+top_peaks = filter(grn, target == my_target) |> arrange(peak)
+```
+
+```{r}
+p_track = my_cov_plot(top_peaks, my_target, my_tfs, show_links = TRUE)
+```
+
+```{r}
+# redefine broad cell types according to what needs to be shown
+# also define how to treat what is not shown -> instead of removing, maybe pool into a line labeled "Other" to provide a baseline of coverage and expression?
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybpc1_prefilter.pdf"), width = 60/3, height = 30/3)
+```
+
+```{r}
+proximal_peaks = filter(top_peaks, gene_distance<=2e4, pct_peak>0.05, zscore>2)
+p_track = my_cov_plot(proximal_peaks, my_target, my_tfs)
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybpc1_proximal.pdf"), width = 60/3, height = 30/3)
+```
+
+```{r}
+distal_peaks = filter(top_peaks, gene_distance>2e4, pct_peak>0.03, zscore>2)
+p_track = my_cov_plot(distal_peaks, my_target, my_tfs)
+p = p_track & scale_fill_manual(values = coverage_colors)  # cell type colors
+p[[3]][[3]] = p[[3]][[3]] +
+    scale_color_gradient(low = "gray70", high = "red4", limits = c(0,NA)) + # color of lines in link plot
+    scale_linewidth_continuous(range = c(0,1), limits=c(0,NA), guide = "none") # relative width of lines in link plot
+options(repr.plot.width=60/3, repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+# not super interesting
+#ggsave(glue::glue("{fig_dir}/coverage_mybpc1_distal.pdf"), width = 60/3, height = 30/3)
+```
+
+```{r}
+my_peaks = unique(proximal_peaks$peak)
+accessibility = t(FeatureMatrix(Fragments(combined[["ATAC"]]), features = my_peaks))
+cells_by_group = as.vector(table(Idents(combined)))
+to_plot = tibble(
+    group = rep(levels(combined), length(my_peaks)),
+    peak = rep(my_peaks, each=nlevels(combined)),
+    avg = c(rowsum(accessibility, group = Idents(combined)) / cells_by_group),
+    pct = c(rowsum(1*(accessibility>0), group = Idents(combined)) / cells_by_group)
+)
+to_plot |>
+    ggplot(aes(x=peak,y=group)) +
+    geom_point(aes(size=pct, color=group)) +
+    theme_classic(base_size = 16) +
+    scale_radius(range = c(0,10)) +
+    scale_color_manual(values = coverage_colors) +
+    guides(color="none") +
+    labs(x=NULL,y=NULL,size="% cells") +
+    #scale_size_area(max_size = 10) +
+    theme(axis.text.x = element_text(angle=45,hjust=1))
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/coverage_mybpc1_dotplot.pdf"))
+```
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    geom_text(x=-0.1,y=0.55,aes(label = glue::glue("Z={round(zscore,1)}")), col="black", size=5) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_within_mybc1_proximal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    geom_text(y=0.25,x=0.65,aes(label = glue::glue("Z={round(zscore,1)}")), col="black", size=5) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip() +
+    theme_classic(base_size = 16)
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave(glue::glue("{fig_dir}/regulators_scatter_across_vs_motif_mybpc1_proximal.pdf"), width = my_width, height = my_height)
+```
+
+```{r}
+all_peaks = sort(unique(proximal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Ppara", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Barx2", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#ggsave(glue::glue("{fig_dir}/regulators_scatter_peak_mybpc1_vs_maf_proximal.pdf"), width = ncol*15/3, height = nrow*15/3)
+```
+
+```{r}
+e=200 # extend visualization by e bp on each side of the peak (0 by default)
+w=100 # size of window for smoothing of cut sites (100 by default)
+tf_motifs = find_motif_position("Ppara", peaks = unique(proximal_peaks$peak), p.cutoff = 1e-3)
+
+p = lapply(unique(proximal_peaks$peak), function(my_peak) {
+    motif_pos = IRanges::mid(tf_motifs[tf_motifs$peak == my_peak])
+    r = CoveragePlot(combined, assay="ATAC", region = my_peak, peaks = FALSE, annotation = FALSE, extend.upstream = e, extend.downstream = e, window = w)
+    r = r + geom_vline(xintercept = motif_pos, color="gray20")
+    r = r + scale_fill_manual(values = coverage_colors)  # cell type colors
+    r = r + theme_void() + theme(strip.text = element_blank()) + labs(title = my_peak) + guides(fill="none")
+})
+p = patchwork::wrap_plots(p)
+options(repr.plot.width = 30/3, repr.plot.height=30/3)
+p
+options(repr.plot.width = 20/3, repr.plot.height=20/3)
+```
+
+```{r}
+e=200 # extend visualization by e bp on each side of the peak (0 by default)
+w=100 # size of window for smoothing of cut sites (100 by default)
+tf_motifs = find_motif_position("Tead1", peaks = unique(proximal_peaks$peak), p.cutoff = 1e-3)
+
+p = lapply(unique(proximal_peaks$peak), function(my_peak) {
+    motif_pos = IRanges::mid(tf_motifs[tf_motifs$peak == my_peak])
+    r = CoveragePlot(combined, assay="ATAC", region = my_peak, peaks = FALSE, annotation = FALSE, extend.upstream = e, extend.downstream = e, window = w)
+    r = r + geom_vline(xintercept = motif_pos, color="gray20")
+    r = r + scale_fill_manual(values = coverage_colors)  # cell type colors
+    r = r + theme_void() + theme(strip.text = element_blank()) + labs(title = my_peak) + guides(fill="none")
+})
+p = patchwork::wrap_plots(p)
+options(repr.plot.width = 30/3, repr.plot.height=30/3)
+p
+options(repr.plot.width = 20/3, repr.plot.height=20/3)
+```
+
+```{r}
+e=200 # extend visualization by e bp on each side of the peak (0 by default)
+w=100 # size of window for smoothing of cut sites (100 by default)
+tf_motifs = find_motif_position("Barx2", peaks = unique(proximal_peaks$peak), p.cutoff = 1e-3)
+
+p = lapply(unique(proximal_peaks$peak), function(my_peak) {
+    motif_pos = IRanges::mid(tf_motifs[tf_motifs$peak == my_peak])
+    r = CoveragePlot(combined, assay="ATAC", region = my_peak, peaks = FALSE, annotation = FALSE, extend.upstream = e, extend.downstream = e, window = w)
+    r = r + geom_vline(xintercept = motif_pos, color="gray20")
+    r = r + scale_fill_manual(values = coverage_colors)  # cell type colors
+    r = r + theme_void() + theme(strip.text = element_blank()) + labs(title = my_peak) + guides(fill="none")
+})
+p = patchwork::wrap_plots(p)
+options(repr.plot.width = 30/3, repr.plot.height=30/3)
+p
+options(repr.plot.width = 20/3, repr.plot.height=20/3)
+```
+
+```{r}
+e=200 # extend visualization by e bp on each side of the peak (0 by default)
+w=100 # size of window for smoothing of cut sites (100 by default)
+tf_motifs = find_motif_position("Tbx15", peaks = unique(proximal_peaks$peak), p.cutoff = 1e-3)
+
+p = lapply(unique(proximal_peaks$peak), function(my_peak) {
+    motif_pos = IRanges::mid(tf_motifs[tf_motifs$peak == my_peak])
+    r = CoveragePlot(combined, assay="ATAC", region = my_peak, peaks = FALSE, annotation = FALSE, extend.upstream = e, extend.downstream = e, window = w)
+    r = r + geom_vline(xintercept = motif_pos, color="gray20")
+    r = r + scale_fill_manual(values = coverage_colors)  # cell type colors
+    r = r + theme_void() + theme(strip.text = element_blank()) + labs(title = my_peak) + guides(fill="none")
+})
+p = patchwork::wrap_plots(p)
+options(repr.plot.width = 30/3, repr.plot.height=30/3)
+p
+options(repr.plot.width = 20/3, repr.plot.height=20/3)
+```
+
+```{r}
+#as_tibble(tbx_motifs) |> write_csv(glue::glue("{fig_dir}/coverage_mybphl_tbx_motifs.csv"))
+#ggsave(glue::glue("{fig_dir}/coverage_mybphl_tbx_motifs.pdf"), width = 30/3, height = 30/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## DEG
+<!-- #endregion -->
+
+### Tissue level
+
+```{r}
+markers = FindAllMarkers(combined, assay="RNA", group.by="tissue")
+```
+
+```{r}
+rosa_gene = rownames(eom[["RNA"]])[grepl("ROSA", rownames(eom[["RNA"]]))]
+rosa_gene
+```
+
+```{r}
+top_n = 20
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_markers = markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+table(combined$tissue)
+```
+
+```{r}
+n_cells = 1500
+cell_subset = c(
+    sample(colnames(combined)[combined$tissue == "EOM"], n_cells),
+    sample(colnames(combined)[combined$tissue == "Limb"], n_cells),
+    sample(colnames(combined)[combined$tissue == "Larynx"], n_cells)
+)
+```
+
+```{r}
+combined$tissue = factor(combined$tissue, c("EOM","Limb","Larynx"))
+DoHeatmap(combined, features = top_markers$gene, group.by = "tissue", slot = "data", cells = cell_subset, raster = FALSE) +
+    scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+```
+
+```{r}
+ggsave("Fig_multiome//heatmap_tissue_markers.pdf", width=20/3)
+```
+
+### Cluster level
+
+```{r}
+markers = FindAllMarkers(combined, assay="RNA")
+```
+
+```{r}
+top_n = 10
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_markers = markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+table(Idents(combined))
+```
+
+```{r}
+n_cells = min(table(Idents(combined)))
+cell_subset = unlist(lapply(levels(combined), function(my_level) {
+    sample(colnames(combined)[Idents(combined) == my_level], n_cells)
+}))
+```
+
+```{r}
+DoHeatmap(combined, features = top_markers$gene, slot = "data", cells = cell_subset, raster = FALSE) +
+    scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+```
+
+```{r}
+ggsave("Fig_multiome//heatmap_cluster_markers.pdf", width=20/3, height=40/3)
+```
+
+### Hierarchical
+
+```{r}
+tissue_markers = FindAllMarkers(combined, assay="RNA", group.by="tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_tissue_markers = tissue_markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+type_markers = bind_rows(lapply(set_names(levels(combined$tissue)), function(my_tissue) {
+    FindAllMarkers(combined[, combined$tissue == my_tissue], assay="RNA")
+}), .id = "tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 0.05
+min_pct = 0.2
+top_type_markers = type_markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, avg_log2FC>0, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+marker_order = c("EOM","Limb","Larynx","EOM Myh3","EOM Myh1+Myh2+Myh4","Limb Myh1","Limb Myh4","Larynx Myh1","Larynx Myh2","Larynx Myh4")
+top_markers = bind_rows(top_tissue_markers, top_type_markers) |>
+    mutate(cluster = factor(cluster, marker_order)) |>
+    arrange(cluster, desc(pct.1))
+```
+
+```{r}
+table(Idents(combined))
+```
+
+```{r}
+n_cells = min(table(Idents(combined)))
+cell_subset = unlist(lapply(levels(combined), function(my_level) {
+    sample(colnames(combined)[Idents(combined) == my_level], n_cells)
+}))
+```
+
+```{r}
+scaled_data = LayerData(combined[["RNA"]])[unique(top_markers$gene),]
+scaled_data = scaled_data / MatrixGenerics::rowMaxs(scaled_data)
+LayerData(combined[["RNA"]], "scale.data") = scaled_data
+```
+
+```{r}
+DoHeatmap(combined, features = top_markers$gene, slot = "scale.data", cells = cell_subset, raster = FALSE, disp.max = 1) +
+    scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+```
+
+```{r}
+ggsave("Fig_multiome//heatmap_hierarchical_markers.pdf", width=40/3, height=20/3)
+```
+
+### Hierarchical - "conserved" subtype markers
+
+```{r}
+tissue_markers = FindAllMarkers(combined, assay="RNA", group.by="tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_tissue_markers = tissue_markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+type_markers = bind_rows(lapply(set_names(levels(combined$tissue)), function(my_tissue) {
+    FindAllMarkers(combined[, combined$tissue == my_tissue], assay="RNA", group.by="broad_type", logfc.threshold = 0, min.pct = 0, min.cells.feature = 0, min.cells.group = 0, return.thresh = 1)
+}), .id = "tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 1e-10
+min_pct = 0.2
+top_type_markers = type_markers |>
+    summarize(p = max(p_val_adj), l2fc = mean(avg_log2FC), pct.1 = exp(mean(log(pct.1))), .by=c("gene","cluster")) |>
+    filter(p < max_p, pct.1 > min_pct, l2fc>0, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-l2fc) <= top_n, .by = "cluster") |>
+    arrange(cluster, l2fc)
+```
+
+```{r}
+marker_order = c("EOM","Limb","Larynx","Myh3","Myh1","Myh2","Myh4")
+top_markers = bind_rows(top_tissue_markers, top_type_markers) |>
+    mutate(cluster = factor(cluster, marker_order)) |>
+    arrange(cluster, desc(pct.1))
+```
+
+```{r}
+scaled_data = LayerData(combined[["RNA"]])[unique(top_markers$gene),]
+scaled_data = scaled_data / MatrixGenerics::rowMaxs(scaled_data)
+LayerData(combined[["RNA"]], "scale.data") = scaled_data
+```
+
+```{r}
+## define cell types to show + order
+combined$my_ct = paste(combined$tissue, combined$broad_type)
+combined$my_ct = factor(combined$my_ct, c("EOM Myh3","EOM Myh1","EOM Myh2","EOM Myh4","Limb Myh1","Limb Myh2","Limb Myh4","Larynx Myh1","Larynx Myh2", "Larynx Myh4"))
+#has_myh2 = LayerData(combined)["Myh2",]>2
+#combined$my_ct[combined$my_ct == "Limb Myh1" & has_myh2] = "Limb Myh2"
+#combined$my_ct = factor(combined$my_ct, c("EOM Myh3","EOM Myh1","EOM Myh2","EOM Myh4","Limb Myh1","Limb Myh2", "Limb Myh4","Larynx Myh1","Larynx Myh2", "Larynx Myh4"))
+## select cells to show: balance groups by subsetting to # cells in smallest group
+n_cells = min(table(combined$my_ct))
+cell_subset = unlist(lapply(levels(combined$my_ct), function(my_level) {
+    sample(colnames(combined)[combined$my_ct == my_level], n_cells)
+}))
+DoHeatmap(combined, features = top_markers$gene, slot = "scale.data", cells = cell_subset, raster = FALSE, disp.max = 1, group.by="my_ct") +
+    scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+```
+
+```{r}
+ggsave("Fig_multiome//heatmap_hierarchical_conserved_markers.pdf", width=40/3, height=20/3)
+```
+
+## Regulon analysis
+
+
+### Dot plot of top regulons
+
+```{r}
+ct_order = c(
+    "EOM Myh1","Limb Myh1","Larynx Myh1",
+    "EOM Myh2","Limb Myh2","Larynx Myh2",
+    "EOM Myh4","Limb Myh4","Larynx Myh4",
+    "EOM Myh3",
+    "EOM Myh7b","Limb Myh7b",
+    "EOM MTJ", "Limb MTJ", "Larynx MTJ",
+    "EOM NMJ", "Limb NMJ", "Larynx NMJ"
+)
+```
+
+```{r}
+head(top_regulons)
+```
+
+```{r}
+regulon_order = top_regulons |>
+    slice_max(auroc, n = 3, by = cell_type) |>
+    add_row(cell_type= "Larynx Myh4", regulon = "Tbx15", auroc=0.5) |>
+    mutate(cell_type = factor(cell_type, ct_order)) |>
+    arrange(cell_type, desc(auroc)) |>
+    pull(regulon) |>
+    unique()
+```
+
+```{r}
+options(repr.plot.width=30/3, repr.plot.height=30/3)
+top_regulons |>
+    mutate(regulon = factor(regulon, rev(regulon_order)), cell_type = factor(cell_type, ct_order)) |>
+    mutate(activity = activity / max(activity), .by = "regulon") |>
+    ggplot(aes(x=cell_type,y=regulon)) +
+    geom_point(aes(col=activity, size=avg_diff)) +
+    scale_color_gradient2(limits=c(0,NA), oob=scales::squish, breaks=c(0,1), labels=c("0","max")) +
+    scale_size_area(max_size = 10, limits=c(0,NA), oob=scales::squish) +
+    theme_classic(base_size = 16) +
+    #scale_radius(range = c(0,10), limits=c(0,5)) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+    #facet_wrap(~dataset, scales="free_x") +
+    
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("Fig_multiome//regulon_dotplot.pdf", width=30/3, height=30/3)
+```
+
+### UMAP of top regulons
+
+```{r}
+goi = c("Lmx1a","Maf", "Tbx15","Mafb")
+```
+
+```{r}
+key_regulons = regulon_df |> filter(tf %in% c("Tbx15","Maf")) |> select(tf, target, estimate, regions)
+head(key_regulons)
+write_csv(key_regulons, "regulons_tbx15_maf.csv")
+```
+
+```{r}
+p = lapply(goi, function(my_tf) {
+    my_reg = glue::glue("regulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff)) & NoAxes()
+})
+p = patchwork::wrap_plots(p, ncol = 1)
+```
+
+```{r}
+options(repr.plot.width=40/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("Fig_multiome//regulon_umap_raw.pdf", width=40/3, height=40/3)
+```
+
+### UMAP of top regulons (smoothed version)
+
+```{r}
+eom[["sregulon"]] = CreateAssayObject(smooth_data(eom, assay_name = "regulon", graph_name = "RNA_nn"))
+limb[["sregulon"]] = CreateAssayObject(smooth_data(limb, assay_name = "regulon", graph_name = "RNA_nn"))
+larynx[["sregulon"]] = CreateAssayObject(smooth_data(larynx, assay_name = "regulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+p = lapply(goi, function(my_tf) {
+    my_reg = glue::glue("sregulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff), oob = scales::squish) & NoAxes()
+})
+p = patchwork::wrap_plots(p, ncol = 1)
+```
+
+```{r}
+options(repr.plot.width=40/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("Fig_multiome//regulon_umap_smoothed.pdf", width=40/3, height=40/3)
+```
+
+### UMAP of TF expression x regulon activity (smoothed)
+
+```{r}
+eom[["tfregulon"]] = CreateAssayObject(matrixStats::rowRanks(as.matrix(LayerData(eom[["regulon"]]))) * LayerData(eom[["RNA"]])[rownames(eom[["regulon"]]),] / ncol(eom))
+eom[["tfregulon"]] = CreateAssayObject(smooth_data(eom, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+limb[["tfregulon"]] = CreateAssayObject(matrixStats::rowRanks(as.matrix(LayerData(limb[["regulon"]]))) * LayerData(limb[["RNA"]])[rownames(limb[["regulon"]]),] / ncol(limb))
+limb[["tfregulon"]] = CreateAssayObject(smooth_data(limb, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+larynx[["tfregulon"]] = CreateAssayObject(matrixStats::rowRanks(as.matrix(LayerData(larynx[["regulon"]]))) * LayerData(larynx[["RNA"]])[rownames(larynx[["regulon"]]),] / ncol(larynx))
+larynx[["tfregulon"]] = CreateAssayObject(smooth_data(larynx, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+p = lapply(goi, function(my_tf) {
+    my_reg = glue::glue("tfregulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff)) & NoAxes()
+})
+p = patchwork::wrap_plots(p, ncol = 1)
+```
+
+```{r}
+options(repr.plot.width=40/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("Fig_multiome//regulon_umap_tfxregulon_smoothed.pdf", width=40/3, height=40/3)
+```
+
+```{r}
+
+```

@@ -1,0 +1,368 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.16.1
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+---
+
+```{r}
+library(tidyverse)
+source("../../processed_data/processed_data.R", chdir=TRUE)
+```
+
+```{r}
+dir.create("Fig1_snRNA", showWarnings = FALSE)
+```
+
+# Figure 1
+
+```{r}
+ta_myo = load_srt("ta_rna", "myo")
+```
+
+```{r}
+eom_myo = load_srt("eom_rna", "myo")
+```
+
+## UMAPs
+
+```{r}
+colors = c(Myh1="#A0CB8D", Myh4="#3FAB6E", MTJ="#E58634", NMJ="#4C67AC",Myh3="#DDAE51", Myh7b="#529899")
+```
+
+```{r}
+DimPlot(ta_myo, cols = colors) & NoAxes()
+ggsave("Fig1_snRNA/umap_ta_myo.pdf")
+```
+
+```{r}
+DimPlot(eom_myo, cols = colors) & NoAxes()
+ggsave("Fig1_snRNA/umap_eom_myo.pdf")
+```
+
+```{r}
+eom_myo$tissue = "eom"
+ta_myo$tissue = "ta"
+combined = JoinLayers(merge(eom_myo, ta_myo))
+```
+
+## Myonuclei markers
+
+```{r}
+markers_eom = FindAllMarkers(eom_myo, group.by="cell_type")
+markers_ta = FindAllMarkers(ta_myo, group.by="cell_type")
+```
+
+```{r}
+all_markers = bind_rows(
+    eom = filter(markers_eom, p_val_adj < 0.05, avg_log2FC>1, pct.1>0.2, !endsWith(gene, "Rik"), !startsWith(gene, "Gm")),
+    ta = filter(markers_ta, p_val_adj < 0.05, avg_log2FC>1, pct.1>0.2, !endsWith(gene, "Rik"), !startsWith(gene, "Gm")),
+    .id = "tissue"
+)
+```
+
+```{r}
+# keep only genes detected in both datasets (except if the cluster is only present in 1)
+# then compute average stats
+all_markers = all_markers |>
+    mutate(is_dataset_specific = length(unique(tissue)) == 1, .by = "cluster") |>
+    filter(is_dataset_specific | n() == 2, .by = c("cluster","gene")) |>
+    summarize(avg_log2FC = mean(avg_log2FC), pct = mean(pct.1), p_val_adj = max(p_val_adj), .by = c("cluster","gene"))
+```
+
+```{r}
+all_markers |>
+    ggplot(aes(x = avg_log2FC, y=-log10(p_val_adj))) +
+    geom_text(aes(label=gene)) +
+    facet_wrap(~ cluster)
+```
+
+```{r}
+top_n = 5
+min_pct = 0.25
+max_p = 1e-10 # adjust threshold to favor highly detected genes
+top_markers = all_markers |>
+    filter(p_val_adj < max_p, pct>min_pct) |> 
+    slice_max(avg_log2FC, n=top_n, by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+levels(eom_myo) = rev(levels(eom_myo))
+levels(ta_myo) = levels(eom_myo)
+```
+
+```{r}
+p_eom = DotPlot(eom_myo, features = top_markers$gene, scale=TRUE)
+p_ta = DotPlot(ta_myo, features = top_markers$gene,scale= TRUE)
+```
+
+```{r}
+options(repr.plot.width=40/3)
+(p_eom / p_ta)  & theme(axis.text.x = element_text(angle=45, hjust=1)) & labs(x=NULL,y=NULL)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+options(repr.plot.width=40/3)
+p = (p_eom / p_ta) &
+    scale_color_gradient(low = "lightgrey",high = "blue",limits=c(-1.5,2), oob = scales::squish) &
+    scale_radius(limits=c(0,100), range = c(0,6)) &
+    theme(axis.text.x = element_text(angle=45, hjust=1)) &
+    labs(x=NULL,y=NULL)
+p = p + patchwork::plot_layout(guides = "collect")
+p
+options(repr.plot.width=20/3)
+```
+
+```{r}
+ggsave("Fig1_snRNA/dotplot_myonuclei.pdf", width=40/3)
+```
+
+## Tissue markers
+
+```{r}
+markers = FindAllMarkers(combined, group.by="tissue")
+```
+
+```{r}
+top_n = 25
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_markers = markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct | pct.2 > min_pct, cluster == "eom", !endsWith(gene, "Rik"), !startsWith(gene, "Gm")) |> 
+    filter(rank(avg_log2FC) <= top_n | rank(-avg_log2FC) <= top_n) |>
+    arrange(avg_log2FC)
+```
+
+```{r}
+table(combined$tissue)
+```
+
+```{r}
+n_cells = 488
+cell_subset = c(
+    sample(colnames(combined)[combined$tissue == "eom"], n_cells),
+    cell_subset = sample(colnames(combined)[combined$tissue == "ta"], n_cells)
+)
+```
+
+```{r}
+DoHeatmap(combined, features = rev(top_markers$gene), group.by = "tissue", slot = "data", cells = cell_subset, raster = FALSE) + scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+ggsave("Fig1_snRNA/heatmap_tissue_markers.pdf", width=10/3)
+```
+
+```{r}
+p = FeaturePlot(eom_myo, c("Mybphl","Myh3"), min.cutoff=0, max.cutoff=3)/ FeaturePlot(ta_myo, c("Mybphl","Myh3"), min.cutoff=0, max.cutoff=3)
+p = (p & NoAxes() & scale_color_gradient2(limits = c(0,3), midpoint = 1.5, low = "gray90", mid="skyblue1", high="skyblue4")) +patchwork::plot_layout(guides = "collect")
+p
+```
+
+```{r}
+ggsave("Fig1_snRNA/umap_mybphl_myh3.pdf")
+```
+
+# FigS1
+
+```{r}
+ta_all = load_srt("ta_rna", "all")
+```
+
+```{r}
+eom_all = load_srt("eom_rna", "all")
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+## QC
+<!-- #endregion -->
+
+```{r}
+metadata = bind_rows(eom_all[[]], ta_all[[]]) |>
+    select(orig.ident, nFeature_RNA, nCount_RNA, pct_mt_rna, class)
+```
+
+```{r}
+p1 = metadata |>
+    ggplot(aes(x=orig.ident,y=nFeature_RNA)) +
+    geom_boxplot(fill="gray70") +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="# genes detected") +
+    expand_limits(y = 0)
+p1
+```
+
+```{r}
+p2 = metadata |>
+    ggplot(aes(x=orig.ident,y=pct_mt_rna)) +
+    geom_boxplot(fill="gray70") +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="%MT reads")
+p2
+```
+
+```{r}
+p3a = metadata |>
+    dplyr::count(orig.ident) |>
+    ggplot(aes(x=orig.ident,y=n)) +
+    geom_col(fill="gray40", width=0.8) +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="# cells (after QC)")
+p3a
+```
+
+```{r}
+p3b = metadata |>
+    dplyr::count(orig.ident,class) |>
+    ggplot(aes(x=orig.ident,y=n)) +
+    geom_col(aes(fill=class), position = "dodge") +
+    theme_classic(base_size = 16) +
+    labs(x=NULL, y="# cells (after QC)")
+p3b
+```
+
+```{r}
+p = p1|p2|p3a|p3b
+p
+```
+
+```{r}
+ggsave("Fig1_snRNA/SFig_qc.pdf", width=40/3)
+```
+
+## UMAPs
+
+```{r}
+DimPlot(eom_all, label=TRUE, repel=TRUE) + NoAxes() + NoLegend()
+```
+
+```{r}
+ggsave("Fig1_snRNA/SFig_umap_eom.pdf")
+```
+
+```{r}
+DimPlot(ta_all, label=TRUE, repel=TRUE) + NoAxes() + NoLegend()
+```
+
+```{r}
+ggsave("Fig1_snRNA/SFig_umap_ta.pdf")
+```
+
+## Annotation
+
+```{r}
+sort(levels(eom_all))
+```
+
+```{r}
+# markers used for annotation
+marker_eom = list(
+    "Myonuclei" = c("Ttn","Obscn","Myh1","Myh2","Myh4","Myh7","Myh15"),
+    #"MTJ" = c("Col22a1","Col24a1","Fras1"),
+    #"NMJ" = c("Col19a1","Etv5","Chrne"),
+    "MuSC" = c("Pax7","Chodl","Fgfr4","Calcr"),
+    
+    "FAPS" = c("Dcn","Tnxb","Lvrn","Pdgfra"),
+    "FAPS types" = c("Csmd1","Gfpt2","Gfra1"),
+    "FAPS-like type" = c("Nebl","Ildr2","Foxd1","Tenm2"),
+    "Tenocytes" = c("Col12a1","Col11a1","Thbs4","Mmp13"),
+    
+    "SMC" = c("Myh11","Il34","Myocd","Col4a6"),
+    "Endothelial" = c("Flt1","Adgrf5","Aqp1","Vwf"),
+    "Pericytes" = c("Reln","Mmrn1","Ccl21a","Flt4"),
+    "Immune" = c("Dock2","F13a1","Ccr2","Ikzf3"),
+    "Microglia" = c("Lair1","Csf3r","Siglech","Selplg"),
+    
+    "Oligo" = c("Mag","Mog","Mobp","Bcas1"),
+    "OPC/Neurons" = c("Pdgfra","Bcas1","Rims2"),
+    "Neurons" = c("Snap25","Syt1","Slc17a6","Slc17a7"),
+    "Astro" = c("Adgrv1","Arhgef4","Rfx4","Gfap"),
+    "Schwann" = c("Cdh19","Slc35f1","Grik2","Chl1"),
+    
+    "Adipo" = c("Acvr1c","Ankef1","Plin1","Cidec"),
+    "Melanocytes" = c("Dct","Tyr","Gucy2f","Tyrp1"),
+    "Pax6 Meis2" = c("Pax6","Meis2","Rbm47","Sntb1"),
+    "HG" = c("Cyp2b19","Dgat2l6","Mogat1","Scd3"),
+    "HG Immune" = c("Slc27a2","Mfsd2a","Cartpt","Pck1")
+)
+eom_order = c(
+    "Myonuclei Myh1/Myh4", "MTJ", "MuSC",
+    "FAPS Csmd1","FAPS Gfpt2", "FAPS Gfra1","FAPS-like Foxd1","FAPS-like Tenm2", "Tenocytes",
+    "SMC Il34", "SMC Col4a6", "Endothelial Aqp1", "Endothelial Vwf", "Pericytes",
+    "Immune F13a1", "Immune Ccr2", "Immune Ikzf3", "Microglia",
+    "Oligodendrocytes", "OPC/Neurons", "Neurons Slc17a6", "Neurons Slc17a7", "Astrocytes", "Schwann",
+    "Adipocytes", "Melanocytes", "Pax6 Meis2", "Harderian gland", "Harderian gland immune"
+)
+```
+
+```{r}
+levels(eom_all) = rev(eom_order)
+p_eom = DotPlot(eom_all, features = as.vector(unique(unlist(marker_eom))), scale=TRUE)
+```
+
+```{r}
+options(repr.plot.width = 60/3)
+p_eom + theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_size_area() + labs(x=NULL,y=NULL)
+options(repr.plot.width = 20/3)
+```
+
+```{r}
+ggsave("Fig1_snRNA/SFig_dotplot_eom.pdf", width=60/3)
+```
+
+```{r}
+sort(levels(ta_all))
+```
+
+```{r}
+# markers used for annotation
+marker_ta = list(
+    "Myonuclei" = c("Ttn","Obscn","Myh1","Myh2","Myh4","Myh7","Myh15"),
+    "MTJ" = c("Col22a1","Col24a1","Fras1"),
+    #"NMJ" = c("Col19a1","Etv5","Chrne"),
+    "MuSC" = c("Pax7","Chodl","Fgfr4","Calcr"),
+    
+    "FAPS" = c("Dcn","Tnxb","Lvrn","Pdgfra"),
+    "FAPS types" = c("Csmd1","Gfpt2","Gfra1"),
+    "FAPS-like type" = c("Nebl","Ildr2","Foxd1","Tenm2"),
+    "Tenocytes" = c("Col12a1","Col11a1","Thbs4","Mmp13"),
+    
+    "SMC" = c("Myh11","Il34","Myocd","Col4a6"),
+    "Endothelial" = c("Flt1","Adgrf5","Aqp1","Vwf"),
+    "Pericytes" = c("Reln","Mmrn1","Ccl21a","Flt4"),
+    "Immune" = c("Dock2","F13a1","Ccr2","Ikzf3")
+)
+ta_order = c(
+    "Myonuclei Myh1", "Myonuclei Myh4", "MTJ", "MuSC",
+    "FAPS Csmd1/Tenm2","FAPS Gfpt2", "FAPS Gfra1", "Tenocytes Thbs4", "Tenocytes Mmp13",
+    "SMC Il34", "Endothelial/Peri/SMC Myocd",
+    "Immune F13a1/Ccr2"
+)
+```
+
+```{r}
+levels(ta_all) = rev(ta_order)
+p_ta = DotPlot(ta_all, features = as.vector(unlist(marker_ta)), scale=TRUE)
+```
+
+```{r}
+options(repr.plot.width = 40/3)
+p_ta + theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_size_area() + labs(x=NULL,y=NULL)
+options(repr.plot.width = 20/3)
+```
+
+```{r}
+ggsave("Fig1_snRNA/SFig_dotplot_ta.pdf", width=40/3)
+```
+
+```{r}
+
+```

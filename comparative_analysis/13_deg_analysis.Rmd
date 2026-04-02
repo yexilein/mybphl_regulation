@@ -1,0 +1,1353 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+---
+
+```{r}
+library(Pando)
+library(matrixStats)
+library(ggupset)
+source("dataset.R")
+source("colors.R")
+source("grn.R")
+```
+
+```{r}
+theme_set(theme_classic(base_size=16))
+```
+
+```{r}
+dir.create("fig/deg", showWarnings = FALSE, recursive = TRUE)
+```
+
+# Load data
+
+```{r}
+eom = load_tissue("eom")
+```
+
+```{r}
+eom$tissue = "EOM"
+```
+
+```{r}
+eom[["ATAC"]] = NULL
+eom[["chromvar"]] = NULL
+```
+
+```{r}
+limb = load_tissue("limb")
+```
+
+```{r}
+limb$tissue = "Limb"
+```
+
+```{r}
+limb[["ATAC"]] = NULL
+limb[["chromvar"]] = NULL
+```
+
+```{r}
+larynx = load_tissue("larynx")
+```
+
+```{r}
+larynx$tissue = "Larynx"
+```
+
+```{r}
+larynx[["ATAC"]] = NULL
+larynx[["chromvar"]] = NULL
+```
+
+```{r}
+eom_rna = load_srt("eom_rna", "myo")
+```
+
+```{r}
+eom_rna$tissue = "EOM RNA"
+```
+
+# Define broad types
+
+```{r}
+ct_colors = c(
+    E14="gray80",E18="gray60",P5="gray40","Other/Immature"="gray20",
+    Myh1="#A0CB8D", Myh4="#3FAB6E", MTJ="#E58634", NMJ="#4C67AC",Myh3="#DDAE51", Myh7b="#529899",Myh2="darkgreen"
+)
+```
+
+```{r}
+eom$broad_type = eom$cell_type
+eom$broad_type[eom$cell_type == "Olfml2a"] = "Other/Immature"
+Idents(eom) = "broad_type"
+levels(eom) = names(ct_colors)
+```
+
+```{r}
+eom_rna$broad_type = eom_rna$cell_type
+Idents(eom_rna) = "broad_type"
+levels(eom_rna) = names(ct_colors)
+```
+
+```{r}
+limb$broad_type = limb$cell_type
+limb$broad_type[limb$cell_type == "MuSC"] = "Other/Immature"
+Idents(limb) = "broad_type"
+levels(limb) = names(ct_colors)
+```
+
+```{r}
+larynx$broad_type = "Other/Immature"
+larynx$broad_type[larynx$cell_type == "Myh1"] = "Myh1"
+larynx$broad_type[larynx$cell_type == "Myh2"] = "Myh2"
+larynx$broad_type[larynx$cell_type == "MTJ"] = "MTJ"
+larynx$broad_type[larynx$cell_type == "NMJ"] = "NMJ"
+larynx$broad_type[grepl("Myh4",larynx$cell_type)] = "Myh4"
+larynx$broad_type[grepl("Myh13",larynx$cell_type)] = "Myh4" # should this be in a separate category?
+Idents(larynx) = "broad_type"
+levels(larynx) = names(ct_colors)
+```
+
+```{r}
+DimPlot(eom, label=TRUE) & NoLegend() & NoAxes()
+```
+
+```{r}
+DimPlot(eom_rna, label=TRUE) & NoLegend() & NoAxes()
+```
+
+```{r}
+DimPlot(limb, label=TRUE) & NoLegend() & NoAxes()
+```
+
+```{r}
+DimPlot(larynx, label=TRUE) & NoLegend() & NoAxes()
+```
+
+# Combine data
+
+```{r}
+coi = c("Myh1","Myh2","Myh3","Myh4")
+combined = merge(
+    eom[, Idents(eom) %in% coi],
+    list(limb[, Idents(limb) %in% coi], larynx[, Idents(larynx) %in% coi], eom_rna[, Idents(eom_rna) %in% coi])
+)
+combined = JoinLayers(combined)
+Idents(combined) = paste(combined$tissue, combined$broad_type)
+```
+
+```{r}
+combined$tissue = factor(combined$tissue, c("EOM","EOM RNA","Limb","Larynx"))
+```
+
+```{r}
+umap = lapply(1:4, \(i) {
+    r = Embeddings(list(eom,limb,larynx,eom_rna)[[i]], "umap_rna")
+    rownames(r) = paste0(rownames(r), "_", i)
+    return(r)
+})
+umap = do.call(rbind, umap)
+combined[["umap"]] = CreateDimReducObject(umap[colnames(combined),], key = "umap_")
+```
+
+```{r}
+rosa_gene = rownames(combined)[grepl("ROSA", rownames(combined))]
+rosa_gene
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+# Compute regulon activity
+<!-- #endregion -->
+
+```{r}
+regulons_df = GetNetwork(readRDS("results/pando/metacell_all.rds")) |>
+    find_modules(xgb_method = "tf") |>
+    NetworkModules()
+regulons_df = regulons_df@meta |> filter(estimate > 0)
+
+regulons = split(regulons_df$target, regulons_df$tf)
+```
+
+```{r}
+p = 0.05
+combined[["regulon"]] = CreateAssayObject(cell_target_auc(combined, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p))
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+# Compute DEG
+<!-- #endregion -->
+
+```{r}
+tissue_markers = FindAllMarkers(combined, assay="RNA", group.by="tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 0.05 
+min_pct = 0.1
+top_tissue_markers = tissue_markers |>
+    filter(p_val_adj < max_p, pct.1 > min_pct, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-avg_log2FC) <= top_n, .by = "cluster") |>
+    arrange(cluster, avg_log2FC)
+```
+
+```{r}
+type_markers = bind_rows(lapply(set_names(levels(combined$tissue)), function(my_tissue) {
+    FindAllMarkers(combined[, combined$tissue == my_tissue], assay="RNA", group.by="broad_type", logfc.threshold = 0, min.pct = 0, min.cells.feature = 0, min.cells.group = 0, return.thresh = 1)
+}), .id = "tissue")
+```
+
+```{r}
+top_n = 5
+# adjust thresholds to favor highly detected genes
+max_p = 1e-10
+min_pct = 0.2
+top_type_markers = type_markers |>
+    summarize(p = max(p_val_adj), l2fc = mean(avg_log2FC), pct.1 = exp(mean(log(pct.1))), .by=c("gene","cluster")) |>
+    filter(p < max_p, pct.1 > min_pct, l2fc>0, !endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |> 
+    filter(rank(-l2fc) <= top_n, .by = "cluster") |>
+    arrange(cluster, l2fc)
+```
+
+```{r}
+marker_order = c("EOM","Limb","Larynx","Myh3","Myh1","Myh2","Myh4")
+top_markers = bind_rows(top_tissue_markers, top_type_markers) |>
+    mutate(cluster = factor(cluster, marker_order)) |>
+    arrange(cluster, desc(pct.1))
+```
+
+```{r}
+scaled_data = LayerData(combined[["RNA"]])[unique(top_markers$gene),]
+scaled_data = scaled_data / MatrixGenerics::rowMaxs(scaled_data)
+LayerData(combined[["RNA"]], "scale.data") = scaled_data
+```
+
+```{r}
+ct_order = c("EOM Myh3","EOM Myh1","EOM Myh2","EOM Myh4","Limb Myh1","Limb Myh2", "Limb Myh4","Larynx Myh1","Larynx Myh2", "Larynx Myh4")
+```
+
+```{r}
+## define cell types to show + order
+combined$my_ct = paste(combined$tissue, combined$broad_type)
+combined$my_ct = factor(combined$my_ct, ct_order)
+#has_myh2 = LayerData(combined)["Myh2",]>2
+#combined$my_ct[combined$my_ct == "Limb Myh1" & has_myh2] = "Limb Myh2"
+#combined$my_ct = factor(combined$my_ct, c("EOM Myh3","EOM Myh1","EOM Myh2","EOM Myh4","Limb Myh1","Limb Myh2", "Limb Myh4","Larynx Myh1","Larynx Myh2", "Larynx Myh4"))
+## select cells to show: balance groups by subsetting to # cells in smallest group
+n_cells = min(table(combined$my_ct))
+cell_subset = unlist(lapply(levels(combined$my_ct), function(my_level) {
+    sample(colnames(combined)[combined$my_ct == my_level], n_cells)
+}))
+DoHeatmap(combined, features = top_markers$gene, slot = "scale.data", cells = cell_subset, raster = FALSE, disp.max = 1, group.by="my_ct") +
+    scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+```
+
+# Tissue and population specific genes
+
+
+Rationale: within each tissue, we extract the genes that best define each population (e.g., Myh1 vs Myh2/Myh4).
+
+
+## Markers
+
+```{r}
+levels(combined$tissue)
+```
+
+```{r}
+coi = c("Myh1","Myh2","Myh4")
+my_tissues = c("EOM","Limb","Larynx")
+type_markers = bind_rows(lapply(set_names(my_tissues), function(my_tissue) {
+    FindAllMarkers(combined[, combined$tissue == my_tissue & combined$broad_type %in% coi], assay="RNA", group.by="broad_type", logfc.threshold = 0, min.pct = 0, min.cells.feature = 0, min.cells.group = 0, return.thresh = 1)
+}), .id = "tissue")
+```
+
+```{r}
+gene_expr_ = log1p(as.matrix(AverageExpression(combined)$RNA))[,1:10] |>
+    as_tibble(rownames = "gene") |>
+    pivot_longer(-gene, names_to = "cell_type", values_to = "gene_expr") |>
+    separate(col = "cell_type", into = c("tissue", "cluster")) |>
+    mutate(z_expr = as.vector(scale(gene_expr)), .by="gene")
+type_markers = inner_join(type_markers, gene_expr_)
+```
+
+```{r}
+expr = log1p(as.matrix(AverageExpression(combined)$RNA))[,1:10]
+gene_order = names(sort(rowMeans(expr), decreasing = TRUE))
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=60/3)
+min_l2fc=2
+max_p=1e-5
+min_pct=0.05
+type_markers |>
+    filter(pct.1 >= min_pct, avg_log2FC>0) |>
+    filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |>
+    ggplot(aes(x=avg_log2FC, y=-log10(p_val_adj))) +
+    geom_point() +
+    geom_vline(xintercept = min_l2fc, linetype="dashed") +
+    geom_hline(yintercept = -log10(max_p), linetype="dashed") +
+    facet_grid(tissue ~ cluster)
+type_markers |>
+    filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= max_p) |>
+    dplyr::count(tissue, cluster)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+as_tibble(expr, rownames = "gene") |>
+    pivot_longer(-gene, names_to = "cell_type", values_to = "expr") |>
+    filter(expr>0) |>
+    ggplot(aes(x=expr, fill = cell_type)) +
+    geom_histogram() +
+    scale_x_log10() +
+    facet_grid(cell_type ~ .)
+```
+
+## Compute gene sets
+
+```{r}
+my_dot_plot = function(srt, marker_list, gene_size=16, ct_size=16, dot_max_size=3, normalization = "0-max") {
+    all_markers = unique(unlist(marker_list))
+    expr = LayerData(srt)[all_markers,]
+    mean_expr = sapply(levels(Idents(srt)), function(ct) { MatrixGenerics::rowMeans2(expr, cols = Idents(srt) == ct) })
+    if (normalization == "0-max") {
+        mean_expr = mean_expr / matrixStats::rowMaxs(mean_expr) # 0-max normalization
+    } else if (normalization == "min-max") {
+        m = matrixStats::rowMins(mean_expr)
+        M = matrixStats::rowMaxs(mean_expr)
+        mean_expr = (mean_expr-m)/(M-m)  # min-max normalization
+    } else {
+        stop("Unknown normalization method.")
+    }
+    dr = sapply(levels(Idents(srt)), function(ct) { MatrixGenerics::rowMeans2(expr>0, cols = Idents(srt) == ct) })
+    my_df = tibble(gene = rep(all_markers, nlevels(Idents(srt))), group = rep(levels(Idents(srt)), each = length(all_markers)), mexpr=as.vector(mean_expr), dr=as.vector(dr))
+    my_df = left_join(my_df, unnest(enframe(marker_list, "ref_type", "gene"), "gene"), by="gene", relationship = "many-to-many")
+    my_df = mutate(my_df, group = factor(group, levels(Idents(srt))))
+    my_df = mutate(my_df, gene = factor(gene, rev(unique(unlist(marker_list)))))
+    my_df = mutate(my_df, ref_type = factor(ref_type, names(marker_list)))
+    p = ggplot(my_df, aes(x=group, y=gene)) +
+        geom_point(aes(size=100*dr, col=mexpr)) +
+        facet_grid(ref_type ~ ., scales = "free", space = "free") +
+        theme(strip.text.y = element_text(angle = 0, size=ct_size),
+              axis.text.x=element_text(size=ct_size),
+              axis.text.y=element_text(size=gene_size),
+              panel.spacing = unit(0.1, "lines")) +
+        scale_size_area(max_size = dot_max_size, limits=c(0,50), oob=scales::squish) +
+        #scale_radius(range = c(0, dot_max_size)) +
+        labs(x=NULL,y=NULL,size="% cells",col="Expr.") +
+        scale_color_gradient(low = "gray80",high="darkblue")
+    return(list(p, my_df))
+}
+```
+
+```{r}
+plot_heatmap = function(combined, my_genes, my_coi) {
+    scaled_data = LayerData(combined[["RNA"]])[unique(my_genes),]
+    scaled_data = scaled_data / MatrixGenerics::rowMaxs(scaled_data)
+    LayerData(combined[["RNA"]], "scale.data") = scaled_data
+    
+    ct_order = c(
+        "EOM Myh3", "EOM Myh1", "EOM Myh2", "EOM Myh4",
+        "EOM RNA Myh3", "EOM RNA Myh1", "EOM RNA Myh2", "EOM RNA Myh4",
+        "Limb Myh1", "Limb Myh2", "Limb Myh4",
+        "Larynx Myh1","Larynx Myh2", "Larynx Myh4"
+    )
+    ct_order = ct_order[grepl(my_coi, ct_order, fixed = TRUE)]
+    combined$my_ct = paste(combined$tissue, combined$broad_type)
+    combined$my_ct = factor(combined$my_ct, ct_order)
+    cell_subset = colnames(combined)[!is.na(combined$my_ct)]
+    p = DoHeatmap(combined, features = my_genes, slot = "scale.data", 
+        cells = cell_subset, raster = FALSE, disp.max = 1, group.by = "my_ct") + 
+        scale_fill_gradientn(colors = RColorBrewer::brewer.pal(n = 9, "Blues"))
+    return(p)
+}
+
+dot_plot = function(combined, my_genes, my_coi) {
+    ct_order = c(
+        "EOM Myh3", "EOM Myh1", "EOM Myh2", "EOM Myh4",
+        "EOM RNA Myh3", "EOM RNA Myh1", "EOM RNA Myh2", "EOM RNA Myh4",
+        "Limb Myh1", "Limb Myh2", "Limb Myh4",
+        "Larynx Myh1","Larynx Myh2", "Larynx Myh4"
+    )
+    ct_order = ct_order[grepl(my_coi, ct_order, fixed = TRUE)]
+    combined$my_ct = paste(combined$tissue, combined$broad_type)
+    combined$my_ct = factor(combined$my_ct, ct_order)
+    Idents(combined) = combined$my_ct
+    p = my_dot_plot(combined[,!is.na(combined$my_ct)], my_genes)
+    return(p)
+}
+
+plot_common_markers = function (my_coi, min_expr=-0.5, min_ratio=0.25, topn=100) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |>
+        slice_min(order_by = p_val_adj, n = topn, by = tissue)
+    
+    if (!is.null(min_expr)) {
+        marker_expr = scale(t(expr[unique(coi_markers$gene),]))
+        is_expressed = marker_expr > min_expr
+    } else {
+        is_expressed = as.matrix(expr[unique(coi_markers$gene),])
+        is_expressed = t(is_expressed > (rowMaxs(is_expressed)*min_ratio))
+    }
+    
+    to_plot = as_tibble(is_expressed, rownames = "type") |>
+        pivot_longer(-type, names_to = "gene", values_to = "is_oe") |>
+        filter(grepl(my_coi, type), is_oe) |>
+        transmute(tissue = gsub(" \\w+$", "", type), gene) |>
+        group_by(gene) |>
+        summarize(tissue=list(tissue)) |>
+        mutate(gene = factor(gene, gene_order))
+        
+    p1 = to_plot |>
+        ggplot(aes(x = tissue)) +
+        geom_bar() +
+        scale_x_upset() +
+        labs(title = my_coi)
+    
+    my_genes = list(
+        #unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Limb","Larynx")) })]))),
+        "EOM/Larynx"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Larynx")) })]))),
+        "Limb/Larynx"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("Limb","Larynx")) })]))),
+        "EOM/Limb"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Limb")) })])))
+    )
+
+    p2 = plot_heatmap(combined, unlist(my_genes), my_coi)
+    p3 = dot_plot(combined, my_genes, my_coi)
+    
+    return(p1 | p2 | p3)
+}
+```
+
+```{r}
+p = lapply(c("Myh1","Myh2","Myh4"), plot_common_markers)
+```
+
+```{r}
+options(repr.plot.width=60/3,repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3,repr.plot.height=20/3)
+pdf("fig/deg/common_markers.pdf", width = 40/3, height=30/3)
+print(p)
+dev.off()
+```
+
+```{r}
+p = lapply(c("Myh1","Myh2","Myh4"), plot_common_markers, min_expr=NULL, min_ratio=0.25)
+```
+
+```{r}
+options(repr.plot.width=40/3,repr.plot.height=30/3)
+p
+options(repr.plot.width=20/3,repr.plot.height=20/3)
+pdf("fig/deg/common_markers_v2.pdf", width = 40/3, height=30/3)
+print(p)
+dev.off()
+```
+
+## Simplex
+
+```{r}
+# simplex representation, we start with three values (a,b,c)
+#  - normalize to sum to 1
+#  - a.exp(i.0) + b.exp(i.2pi/3) + c.exp(i.4pi/3)
+#  - x = [a b c] A = [ [1 0] [-0.5 sqrt(3)/3] [-0.5 -sqrt(3)/3] ]
+vertices = tribble(
+    ~x, ~y,
+    1, 0,
+    -0.5, sqrt(3)/2,
+    -0.5, -sqrt(3)/2
+)
+make_simplex_coord = function(x) {
+    x = t(x/rowSums(x))
+    r = crossprod(x, as.matrix(vertices))
+    return(r)
+}
+```
+
+```{r}
+head(type_markers)
+```
+
+```{r}
+min_l2fc=2
+max_p=1e-5
+min_pct=0.05
+p = lapply(c("Myh1","Myh2","Myh4"), function(my_coi) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+    
+    activity_coord = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        mutate(my_stat = gene_expr, .by = "gene") |>
+        pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+        column_to_rownames("gene") |>
+        as.matrix()
+    simplex_coord = make_simplex_coord(activity_coord)
+
+    average_activity = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        summarize(diff_activity = mean(avg_log2FC), pct=mean(pct.1), .by = "gene")
+    
+    as_tibble(simplex_coord, rownames = "gene") |>
+        inner_join(average_activity) |>
+        arrange(diff_activity) |>
+        ggplot(aes(y,x)) +
+        geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="gray50") +
+        geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+        #geom_label(aes(label=gene, color = diff_activity, size=diff_activity)) +
+        geom_point(aes(color = diff_activity, size=pct)) +
+        theme_void() +
+        coord_fixed() +
+        scale_color_gradient(low = "black", high = "red2") +
+        scale_size(range = c(0,5), limits=c(0,1)) +
+        labs(title = my_coi, color="avg_l2fc")
+})
+```
+
+```{r}
+options(repr.plot.width=60/3)
+patchwork::wrap_plots(p)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+ggsave("fig/deg/simplex_average_expression.pdf", width = 60/3)
+```
+
+```{r}
+min_l2fc=2
+max_p=1e-5
+min_pct=0.05
+p = lapply(c("Myh1","Myh2","Myh4"), function(my_coi) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+    
+    activity_coord = type_markers |>
+        mutate(my_stat = (gene_expr - min(gene_expr))/(max(gene_expr)-min(gene_expr)), .by = "gene") |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+        column_to_rownames("gene") |>
+        as.matrix()
+    simplex_coord = make_simplex_coord(activity_coord)
+
+    average_activity = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        summarize(diff_activity = mean(avg_log2FC), pct=mean(pct.1), .by = "gene")
+    
+    as_tibble(simplex_coord, rownames = "gene") |>
+        inner_join(average_activity) |>
+        arrange(diff_activity) |>
+        ggplot(aes(y,x)) +
+        geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="gray50") +
+        geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+        #geom_label(aes(label=gene, color = diff_activity, size=diff_activity)) +
+        geom_point(aes(color = diff_activity, size=pct)) +
+        theme_void() +
+        coord_fixed() +
+        scale_color_gradient(low = "black", high = "red2") +
+        scale_size(range = c(0,5), limits=c(0,1)) +
+        labs(title = my_coi, color="avg_l2fc")
+})
+```
+
+```{r}
+options(repr.plot.width=60/3)
+patchwork::wrap_plots(p)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+ggsave("fig/deg/simplex_scaled_expression.pdf", width = 60/3)
+```
+
+```{r}
+min_l2fc=2
+max_p=1e-5
+min_pct=0.05
+p = lapply(c("Myh1","Myh2","Myh4"), function(my_coi) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+    
+    activity_coord = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        mutate(my_stat = gene_expr, .by = "gene") |>
+        pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+        column_to_rownames("gene") |>
+        as.matrix()
+    simplex_coord = make_simplex_coord(activity_coord)
+
+    average_activity = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        summarize(activity = mean(avg_log2FC), .by = "gene") |>
+        deframe()
+    
+    as_tibble(simplex_coord, rownames = "gene") |>
+        mutate(diff_activity = average_activity[gene]) |>
+        arrange(diff_activity) |>
+        ggplot(aes(y,x)) +
+        geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+        geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+        geom_label(aes(label=gene, color = diff_activity, size=diff_activity)) +
+        theme_void() +
+        coord_fixed() +
+        scale_color_gradient(low = "black", high = "red2") +
+        scale_size(range = c(3,5), guide=NULL) +
+        labs(title = my_coi)
+})
+```
+
+```{r}
+options(repr.plot.width=60/3)
+patchwork::wrap_plots(p)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+ggsave("fig/deg/average_expression_with_names.pdf", width = 60/3)
+```
+
+## ORA
+
+```{r}
+library(clusterProfiler)
+library(AnnotationHub) # ensembl-supported package
+library(org.Mm.eg.db)
+```
+
+```{r}
+library(enrichplot)
+```
+
+```{r}
+compute_ora = function(gene_sets, gene_universe, min_size=10, max_size=200, pval_cutoff=0.1, qval_cutoff=0.1) {
+    my_ora = compareCluster(
+        gene_sets, enrichGO, universe = gene_universe, maxGSSize=max_size, minGSSize=min_size,
+        keyType = "SYMBOL", OrgDb = org.Mm.eg.db, ont = "BP", 
+        pAdjustMethod = "BH", qvalueCutoff = qval_cutoff, pvalueCutoff = pval_cutoff, readable = TRUE
+    )
+    return(my_ora)
+}
+
+get_goa = function(go_id) {
+    my_db = org.Mm.eg.db
+    result = select(my_db, keys = go_id, keytype = "GO", columns = c("SYMBOL"))
+    return(result)
+}
+```
+
+```{r}
+my_coi = "Myh4"
+topn=100
+min_l2fc=0.5
+max_p=0.05
+min_pct=0.01
+coi_markers = type_markers |>
+    filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi) |>
+    filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene) |>
+    slice_min(order_by = p_val_adj, n = topn, by = tissue)
+
+gene_universe = type_markers |>
+    filter(pct.1 >= min_pct) |>
+    pull(gene) |>
+    unique()
+```
+
+```{r}
+min_expr = 0
+marker_expr = scale(t(expr[unique(coi_markers$gene),]))
+is_expressed = marker_expr > min_expr
+
+to_plot = as_tibble(is_expressed, rownames = "type") |>
+    pivot_longer(-type, names_to = "gene", values_to = "is_oe") |>
+    filter(grepl(my_coi, type), is_oe) |>
+    transmute(tissue = gsub(" \\w+$", "", type), gene) |>
+    group_by(gene) |>
+    summarize(tissue=list(tissue)) |>
+    mutate(gene = factor(gene, gene_order))
+dim(to_plot)
+```
+
+```{r}
+p1 = to_plot |>
+    ggplot(aes(x = tissue)) +
+    geom_bar() +
+    scale_x_upset() +
+    labs(title = my_coi)
+p1
+```
+
+```{r}
+my_genes = list(
+    "common"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Limb","Larynx")) })]))),
+    "eom/larynx"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Larynx")) })]))),
+    "limb/larynx"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("Limb","Larynx")) })]))),
+    "eom/limb"=unique(as.character(sort(to_plot$gene[sapply(to_plot$tissue, function(t) { identical(t, c("EOM","Limb")) })])))
+)
+lapply(my_genes, length)
+```
+
+```{r}
+ora = compute_ora(my_genes, unique(type_markers$gene), pval_cutoff = 0.2, qval_cutoff = 0.2)
+#ora = compute_ora(my_genes, gene_universe, pval_cutoff = 0.5, qval_cutoff = 0.5)
+```
+
+```{r}
+# plot results
+p = dotplot(ora, showCategory=10) +
+    theme(axis.text.x = element_text(angle=45, hjust=1, size=12), axis.text.y = element_text(size=8)) +
+    labs(title = "Myh4")
+
+options(repr.plot.width=30/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("fig/deg/markers_ora.pdf", height=40/3, width=30/3)
+```
+
+```{r}
+as_tibble(ora) |> filter(Cluster == "eom/larynx") |> head(10) |> write_csv("fig/deg/ora_eom_larynx.csv")
+```
+
+```{r}
+test = pairwise_termsim(ora)
+```
+
+```{r}
+test@compareClusterResult = test@compareClusterResult |> mutate(Count = 1/n(), .by = "ID")
+```
+
+```{r}
+p=emapplot(test, showCategory=20, size_edge=0.1, layout="kk")
+```
+
+```{r}
+p$layers[[2]]$data$pathway_size=0.1
+p$layers[[6]]$aes_params$size=2
+p = p + labs(title = "Myh4")
+```
+
+```{r}
+options(repr.plot.width=40/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("fig/deg/markers_ora_graph.pdf", height=40/3, width=40/3)
+```
+
+# Tissue and population specific regulons
+
+
+Rationale: within each tissue, we extract the regulons that best define each population (e.g., Myh1 vs Myh2/Myh4).
+
+
+## Compute top regulons
+
+```{r}
+coi = c("Myh1","Myh2","Myh4")
+type_markers = bind_rows(lapply(set_names(levels(combined$tissue)), function(my_tissue) {
+    FindAllMarkers(combined[, combined$tissue == my_tissue & combined$broad_type %in% coi], assay="regulon", group.by="broad_type", logfc.threshold = 0, min.pct = 0, min.cells.feature = 0, min.cells.group = 0, return.thresh = 1, mean.fxn = rowMeans)
+}), .id = "tissue")
+```
+
+```{r}
+gene_expr_ = log1p(as.matrix(AverageExpression(combined)$RNA)) |>
+    as_tibble(rownames = "gene") |>
+    pivot_longer(-gene, names_to = "cell_type", values_to = "gene_expr") |>
+    separate(col = "cell_type", into = c("tissue", "cluster"))
+type_markers = inner_join(type_markers, gene_expr_)
+```
+
+```{r}
+#expr = log(as.matrix(AverageExpression(combined, layer="counts")$regulon) + 1e-5)
+expr = as.matrix(AverageExpression(combined, layer="counts")$regulon)
+gene_order = names(sort(rowMeans(expr), decreasing = TRUE))
+```
+
+```{r}
+reg_act = expr |>
+    as_tibble(rownames = "gene") |>
+    pivot_longer(-gene, names_to = "cell_type", values_to = "activity") |>
+    separate(col = "cell_type", into = c("tissue", "cluster"))
+type_markers = inner_join(type_markers, reg_act)
+```
+
+```{r}
+#type_markers = mutate(type_markers, scaled_activity = as.vector(scale(activity)), .by = "gene")
+```
+
+```{r}
+min_l2fc = 5e-4
+min_pct = 0
+min_expr=1
+```
+
+## Find good summary representations
+
+```{r}
+# simplex representation, we start with three values (a,b,c)
+#  - normalize to sum to 1
+#  - a.exp(i.0) + b.exp(i.2pi/3) + c.exp(i.4pi/3)
+#  - x = [a b c] A = [ [1 0] [-0.5 sqrt(3)/3] [-0.5 -sqrt(3)/3] ]
+vertices = tribble(
+    ~x, ~y,
+    1, 0,
+    -0.5, sqrt(3)/2,
+    -0.5, -sqrt(3)/2
+)
+make_simplex_coord = function(x) {
+    x = t(x/rowSums(x))
+    r = crossprod(x, as.matrix(vertices))
+    return(r)
+}
+```
+
+```{r}
+as_tibble(make_simplex_coord(cbind(c(1,0,0,10,1),c(0,1,0,0,1),c(0,0,1,0,0)))) |>
+    ggplot(aes(y,x)) +
+    geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+    geom_point() +
+    theme_void() +
+    coord_fixed()
+```
+
+```{r}
+my_coi = "Myh4"
+```
+
+```{r}
+coi_markers = type_markers |>
+    filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi, gene_expr >= min_expr) |>
+    filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+table(coi_markers$tissue)
+length(unique(coi_markers$gene))
+```
+
+```{r}
+activity_coord = type_markers |>
+    filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+    mutate(my_stat = activity) |>
+    pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+    column_to_rownames("gene") |>
+    as.matrix()
+simplex_coord = make_simplex_coord(activity_coord)
+```
+
+```{r}
+as_tibble(simplex_coord, rownames = "gene") |>
+    ggplot(aes(y,x)) +
+    geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+    geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+    geom_text(aes(label=gene)) +
+    theme_void() +
+    coord_fixed()
+```
+
+```{r}
+activity_coord = type_markers |>
+    filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+    mutate(my_stat = gene_expr*activity) |>
+    pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+    column_to_rownames("gene") |>
+    as.matrix()
+simplex_coord = make_simplex_coord(activity_coord)
+
+average_activity = type_markers |>
+    filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+    summarize(activity = mean(avg_log2FC), .by = "gene") |>
+    deframe()
+
+as_tibble(simplex_coord, rownames = "gene") |>
+    mutate(average_activity = average_activity[gene]) |>
+    arrange(average_activity) |>
+    ggplot(aes(y,x)) +
+    geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+    geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+    geom_text(aes(label=gene, color = average_activity, size=average_activity), outline=0.1) +
+    theme_void() +
+    scale_color_gradient(low = "gray70", high = "red") +
+    coord_fixed()
+```
+
+## Summary
+
+```{r}
+# option 1: regulon activity
+p = lapply(c("Myh1","Myh2","Myh4"), function(my_coi) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi, gene_expr >= min_expr) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+    
+    activity_coord = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        mutate(my_stat = activity, .by = "gene") |>
+        pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+        column_to_rownames("gene") |>
+        as.matrix()
+    simplex_coord = make_simplex_coord(activity_coord)
+
+    average_activity = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        summarize(activity = mean(avg_log2FC), .by = "gene") |>
+        deframe()
+    
+    as_tibble(simplex_coord, rownames = "gene") |>
+        mutate(diff_activity = average_activity[gene]) |>
+        arrange(diff_activity) |>
+        ggplot(aes(y,x)) +
+        geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+        geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+        geom_text(aes(label=gene, color = diff_activity, size=diff_activity), outline=0.1) +
+        theme_void() +
+        coord_fixed() +
+        scale_color_gradient(low = "gray80", high = "red2") +
+        labs(title = my_coi)
+})
+```
+
+```{r}
+options(repr.plot.width=60/3)
+patchwork::wrap_plots(p)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+# option 2: regulon activity * TF expression
+p = lapply(c("Myh1","Myh2","Myh4"), function(my_coi) {
+    coi_markers = type_markers |>
+        filter(avg_log2FC >= min_l2fc, pct.1 >= min_pct, p_val_adj <= 0.05, cluster == my_coi, gene_expr >= min_expr) |>
+        filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene)
+    
+    activity_coord = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        mutate(my_stat = activity*gene_expr, .by = "gene") |>
+        pivot_wider(id_cols = gene, names_from = tissue, values_from = my_stat) |>
+        column_to_rownames("gene") |>
+        as.matrix()
+    simplex_coord = make_simplex_coord(activity_coord)
+
+    average_activity = type_markers |>
+        filter(gene %in% unique(coi_markers$gene), cluster==my_coi) |>
+        summarize(activity = mean(avg_log2FC), .by = "gene") |>
+        deframe()
+    
+    as_tibble(simplex_coord, rownames = "gene") |>
+        mutate(diff_activity = average_activity[gene]) |>
+        arrange(diff_activity) |>
+        ggplot(aes(y,x)) +
+        geom_polygon(data = vertices, fill=NA, linewidth=0.5, color="black") +
+        geom_text(data = vertices*1.1, label=colnames(activity_coord)) +
+        geom_label(aes(label=gene, color = diff_activity, size=diff_activity)) +
+        theme_void() +
+        coord_fixed() +
+        scale_color_gradient(low = "black", high = "red2") +
+        scale_size(range = c(3,5), guide=NULL) +
+        labs(title = my_coi)
+})
+```
+
+```{r}
+options(repr.plot.width=60/3)
+patchwork::wrap_plots(p)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+ggsave("fig/deg/regulon_activity.pdf", width = 60/3)
+```
+
+```{r}
+my_gene = "Foxp1"
+options(repr.plot.width=60/3)
+FeaturePlot(combined, glue::glue("regulon_{my_gene}"), split.by="tissue", label=TRUE, max.cutoff="q95", min.cutoff="q5") & NoAxes() & scale_color_distiller(palette = "RdYlBu")
+FeaturePlot(combined, my_gene, split.by="tissue", label=TRUE, min.cutoff="q5",max.cutoff="q95") & NoAxes() & scale_color_distiller(palette = "RdYlBu")
+options(repr.plot.width=20/3)
+```
+
+## ORA
+
+```{r}
+regulons_df = GetNetwork(readRDS("results/pando/metacell_all.rds")) |>
+    find_modules(xgb_method = "tf", xgb_top = 100) |>
+    NetworkModules()
+regulons_df = regulons_df@meta |> filter(estimate > 0)
+
+regulons = split(regulons_df$target, regulons_df$tf)
+```
+
+```{r}
+my_tf = c("Ppara","Prrx1","Tbx15","Maf")
+```
+
+```{r}
+gs = regulons[my_tf]
+names(gs) = paste(seq_along(gs), names(gs))
+```
+
+```{r}
+n_cells = rowSums(LayerData(combined)>0)
+hist(log10(n_cells)+1)
+gene_universe = names(n_cells)[n_cells>=0]
+```
+
+```{r}
+ora = compute_ora(gs, gene_universe = rownames(combined), pval_cutoff = 0.2, qval_cutoff = 0.2)
+#write_csv(as_tibble(as.data.frame(ora)), file.path(out_dir, glue::glue("ora_{suffix}.csv")))
+```
+
+```{r}
+# plot results
+p = dotplot(ora, showCategory=10) + theme(axis.text.x = element_text(angle=45, hjust=1, size=12), axis.text.y = element_text(size=12))
+p = p + labs(title = "Myh4")
+options(repr.plot.width=30/3,repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3,repr.plot.height=20/3)
+#ggsave(file.path(fig_dir, glue::glue("ora_{suffix}.pdf")), p)
+```
+
+```{r}
+ggsave("fig/deg/regulon_ora.pdf", width = 30/3, heigh=40/3)
+```
+
+```{r}
+test = pairwise_termsim(ora)
+```
+
+```{r}
+test@compareClusterResult = test@compareClusterResult |> mutate(Count = 1/n(), .by = "ID")
+```
+
+```{r}
+p=emapplot(test, showCategory=20, size_edge=0.1, layout="kk")
+```
+
+```{r}
+p$layers[[2]]$data$pathway_size=0.1
+p$layers[[6]]$aes_params$size=2
+p = p + labs(title = "Myh4")
+```
+
+```{r}
+options(repr.plot.width=40/3, repr.plot.height=40/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ggsave("fig/deg/regulon_ora_graph.pdf", width = 40/3, heigh=40/3)
+```
+
+## And Myh13?
+
+```{r}
+myh_expr = log1p(as.matrix(AverageExpression(combined, assays = "RNA", features = c("Myh1","Myh2","Myh4","Myh13"))$RNA))
+```
+
+```{r}
+tf_activity = as.matrix(AverageExpression(combined, layer="counts")$regulon)
+```
+
+```{r}
+tf_expr = log1p(as.matrix(AverageExpression(combined, assays = "RNA", features = rownames(tf_activity))$RNA))
+```
+
+```{r}
+my_cor = cor(t(tf_activity*tf_expr), t(myh_expr), method="s")
+my_cor[order(-my_cor[,"Myh13"]),][1:10,]
+```
+
+```{r}
+my_gene = "Cux1"
+options(repr.plot.width=60/3)
+FeaturePlot(combined, glue::glue("regulon_{my_gene}"), split.by="tissue", label=TRUE, max.cutoff="q95", min.cutoff="q5") & NoAxes() & scale_color_distiller(palette = "RdYlBu")
+FeaturePlot(combined, my_gene, split.by="tissue", label=TRUE, min.cutoff="q5",max.cutoff="q95") & NoAxes() & scale_color_distiller(palette = "RdYlBu")
+options(repr.plot.width=20/3)
+```
+
+# Tissue-specific genes
+
+
+Rationale: within each population, we extract the genes that best define each tissue.
+
+
+## Markers
+
+```{r}
+coi = c("Myh1","Myh2","Myh4")
+tissue_markers = bind_rows(lapply(set_names(coi), function(my_coi) {
+    as_tibble(FindMarkers(combined[, combined$broad_type == my_coi], assay="RNA", group.by="tissue", ident.1 = "EOM", ident.2 = "Limb", logfc.threshold = 0, min.pct = 0, min.cells.feature = 0, min.cells.group = 0, return.thresh = 1), rownames="gene")
+}), .id = "cluster")
+```
+
+```{r}
+gene_expr_ = log1p(as.matrix(AverageExpression(combined, group.by = c("tissue","broad_type"))$RNA)) |>
+    as_tibble(rownames = "gene") |>
+    pivot_longer(-gene, names_to = "cell_type", values_to = "gene_expr") |>
+    separate(col = "cell_type", into = c("tissue", "cluster")) |>
+    pivot_wider(id_cols = c(gene, cluster), names_from = tissue, values_from = gene_expr)
+```
+
+```{r}
+head(tissue_markers)
+head(gene_expr_)
+```
+
+```{r}
+coi = "Myh4"
+tissue1 = "EOM"
+tissue2 = "Limb"
+min_l2fc=2
+max_p=1e-5
+max_p_highlight=1e-40
+min_pct=0.05
+p = tissue_markers |>
+    filter(!endsWith(gene, "Rik"), !startsWith(gene, "Gm"), gene != rosa_gene, cluster == coi) |>
+    inner_join(gene_expr_) |>
+    mutate(is_significant = p_val_adj < max_p_highlight & abs(avg_log2FC)>min_l2fc & (pct.1>min_pct | pct.2 >min_pct)) |>
+    mutate(to_highlight = p_val_adj < max_p_highlight & abs(avg_log2FC)>min_l2fc & (pct.1>min_pct | pct.2 >min_pct)) |>
+    ggplot(aes(x=.data[[tissue1]], y=.data[[tissue2]])) +
+    geom_point(aes(color=is_significant), size=0.1, show.legend = FALSE) +
+    geom_text(data = . %>% filter(to_highlight), aes(label=gene)) +
+    scale_color_manual(values = c("TRUE"="red4","FALSE"="gray70"))
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+p
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+# Pseudobulk analysis
+<!-- #endregion -->
+
+```{r}
+pseudobulk = AggregateExpression(combined, group.by=c("tissue", "cluster_name"))$RNA
+pseudobulk = CreateSeuratObject(pseudobulk)
+pseudobulk = NormalizeData(pseudobulk)
+```
+
+```{r}
+pseudobulk$cell_type = gsub("^\\w+_", "", colnames(pseudobulk))
+pseudobulk$tissue = gsub("_.*$", "", colnames(pseudobulk))
+```
+
+```{r}
+combined = split(combined, f=combined$tissue)
+hvg = VariableFeatures(FindVariableFeatures(combined))
+combined = JoinLayers(combined)
+```
+
+```{r}
+pseudobulk = ScaleData(pseudobulk, features=hvg, vars.to.regress = "tissue")
+pseudobulk = RunPCA(pseudobulk, features = hvg, npcs = 9)
+```
+
+```{r}
+ElbowPlot(pseudobulk)
+```
+
+```{r}
+pseudobulk$cell_type=gsub("^\\w+ ","",colnames(pseudobulk))
+pseudobulk$cell_type=colnames(pseudobulk)
+Idents(pseudobulk) = "cell_type"
+```
+
+```{r}
+DimPlot(pseudobulk, label = TRUE, dims = 0+1:2) + NoLegend()
+```
+
+```{r}
+my_genes = hvg[1:2000]
+my_genes = rownames(combined)[rowMeans(LayerData(combined)>0) > 0.05 & rowMeans(LayerData(combined)>0) < 0.5]
+x = as.matrix(LayerData(pseudobulk)[my_genes,])
+x = x / rowSums(x**2)
+```
+
+```{r}
+test = NMF::nmf(x, rank = 8)
+```
+
+```{r}
+to_plot = as_tibble(test@fit@H) |>
+    mutate(latent_dim = 1:n()) |>
+    pivot_longer(-latent_dim, names_to = "cell_type", values_to = "loading")
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=60/3)
+ggplot(to_plot, aes(x=cell_type,y=loading)) +
+    geom_col() +
+    facet_wrap(~ latent_dim) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+<!-- #region jp-MarkdownHeadingCollapsed=true -->
+# Unsupervised analysis
+<!-- #endregion -->
+
+```{r}
+combined = split(combined, f=combined$tissue)
+combined = FindVariableFeatures(combined)
+```
+
+```{r}
+combined = ScaleData(combined, features=hvg)
+combined = RunPCA(combined, features = hvg)
+```
+
+```{r}
+combined = IntegrateLayers(combined, method = RPCAIntegration)
+```
+
+```{r}
+combined = JoinLayers(combined)
+```
+
+```{r}
+combined
+```
+
+```{r}
+combined = RunUMAP(combined, reduction = "integrated.dr", dims = 1:10)
+```
+
+```{r}
+DimPlot(combined, label=TRUE)
+```
+
+```{r}
+FeaturePlot(combined, "Myh13")
+```
+
+```{r}
+my_genes = hvg[1:2000]
+my_genes = rownames(combined)[rowMeans(LayerData(combined)>0) > 0.05 & rowMeans(LayerData(combined)>0) < 0.5]
+x = as.matrix(LayerData(pseudobulk)[my_genes,])
+x = x / rowSums(x**2)
+```
+
+```{r}
+test = NMF::nmf(x, rank = 8)
+```
+
+```{r}
+to_plot = as_tibble(test@fit@H) |>
+    mutate(latent_dim = 1:n()) |>
+    pivot_longer(-latent_dim, names_to = "cell_type", values_to = "loading")
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=60/3)
+ggplot(to_plot, aes(x=cell_type,y=loading)) +
+    geom_col() +
+    facet_wrap(~ latent_dim) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+# Coexpression analysis
+
+```{r}
+# correlation = crossprod(scaled) / (n-1)
+my_cor = function(expr) {
+#    my_expr = scale(matrixStats::rowRanks(as.matrix(expr), ties.method="average"))
+    my_expr = scale(expr)
+    my_expr[is.na(my_expr)] = 0
+    return(crossprod(my_expr) / (nrow(my_expr)-1))
+}
+
+# rank-normalized coexpression matrix
+my_coexp = function(expr) {
+    result = my_cor(expr)
+    result = matrix((rank(result, ties.method = "average")-1)/(length(result)-1), nrow = nrow(result))
+    return(result)
+}
+```
+
+```{r}
+cell_type = paste0(combined$tissue, "_", combined$cluster_name)
+```
+
+```{r}
+combined = split(combined, f=combined$tissue)
+hvg = VariableFeatures(FindVariableFeatures(combined))
+combined = JoinLayers(combined)
+```
+
+```{r}
+# 3s per cell type
+coexp = lapply(unique(cell_type), function(my_ct) {
+    message(my_ct)
+    my_coexp(t(as.matrix(LayerData(combined)[hvg,cell_type == my_ct])))
+})
+```
+
+```{r}
+coexp = Reduce("+", coexp) / length(coexp)
+dimnames(coexp) = list(hvg, hvg)
+```
+
+```{r}
+my_hclust = hclust(as.dist(1-coexp), method = "average")
+```
+
+```{r}
+my_cols = colorRampPalette(rev(RColorBrewer::brewer.pal(11, "RdYlBu")))(20)
+gplots::heatmap.2(2*coexp-1, Rowv = as.dendrogram(my_hclust), Colv = as.dendrogram(my_hclust), trace = "none", col = my_cols)
+```
+
+```{r}
+modules = dynamicTreeCut::cutreeDynamic(my_hclust, minClusterSize = 20)
+modules = split(rownames(coexp), modules)
+```
+
+```{r}
+length(modules)
+```
+
+```{r}
+combined = AddModuleScore(combined, features = modules, name="module")
+```
+
+```{r}
+my_gene = "Sgce"
+my_module = which(sapply(modules, \(m) { my_gene %in% m }))
+my_module
+length(modules[[my_module]])
+```
+
+```{r}
+modules[[my_module]]
+```
+
+```{r}
+options(repr.plot.width=60/3)
+FeaturePlot(combined, paste0("module", my_module), split.by="tissue") & NoAxes() & scale_color_gradient2()
+FeaturePlot(combined, my_gene, split.by="tissue") & NoAxes() & scale_color_gradient(low = "gray90",high="darkorange")
+options(repr.plot.width=20/3)
+```
+
+```{r}
+
+```

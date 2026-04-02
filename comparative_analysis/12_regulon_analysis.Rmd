@@ -1,0 +1,405 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+---
+
+```{r}
+library(Pando)
+library(matrixStats)
+source("dataset.R")
+source("colors.R")
+source("grn.R")
+```
+
+```{r}
+theme_set(theme_classic(base_size=16))
+```
+
+# Load data
+
+```{r}
+eom = load_tissue("eom")
+```
+
+```{r}
+limb = load_tissue("limb")
+```
+
+```{r}
+larynx = load_tissue("larynx")
+```
+
+# Define broad types
+
+```{r}
+ct_colors = c(
+    "Other/Immature"="gray20",
+    Myh1="#A0CB8D", Myh4="#3FAB6E", MTJ="#E58634", NMJ="#4C67AC",Myh3="#DDAE51", Myh7b="#529899",Myh2="darkgreen"
+)
+```
+
+```{r}
+eom$broad_type = eom$cell_type
+eom$broad_type[eom$cell_type == "Olfml2a"] = "Other/Immature"
+Idents(eom) = "broad_type"
+levels(eom) = names(ct_colors)
+```
+
+```{r}
+table(limb$cell_type)
+```
+
+```{r}
+limb$broad_type = limb$cell_type
+limb$broad_type[limb$cell_type == "MuSC"] = "Other/Immature"
+Idents(limb) = "broad_type"
+levels(limb) = names(ct_colors)
+```
+
+```{r}
+larynx$broad_type = "Other/Immature"
+larynx$broad_type[larynx$cell_type == "Myh1"] = "Myh1"
+larynx$broad_type[larynx$cell_type == "Myh2"] = "Myh2"
+larynx$broad_type[larynx$cell_type == "MTJ"] = "MTJ"
+larynx$broad_type[larynx$cell_type == "NMJ"] = "NMJ"
+larynx$broad_type[grepl("Myh4",larynx$cell_type)] = "Myh4"
+larynx$broad_type[grepl("Myh13",larynx$cell_type)] = "Myh4" # should this be in a separate category?
+Idents(larynx) = "broad_type"
+levels(larynx) = names(ct_colors)
+```
+
+```{r}
+DimPlot(eom, label=TRUE) & NoLegend() & NoAxes()
+```
+
+```{r}
+DimPlot(limb, label=TRUE) & NoLegend() & NoAxes()
+```
+
+```{r}
+DimPlot(larynx, label=TRUE) & NoLegend() & NoAxes()
+```
+
+# Regulon similarity
+
+
+## Top regulons - adult
+
+
+```
+eom_regulons = GetNetwork(readRDS("../../lmx1a_paper/eom_multiome/results/pando/metacell_100_all.rds")) |>
+    find_modules(xgb_method = "tf") |>
+    NetworkModules()
+eom_regulons = eom_regulons@meta |> filter(estimate > 0)
+limb_regulons = GetNetwork(readRDS("../dossantos23/results/pando/metacell_70.rds")) |>
+    find_modules(xgb_method = "tf") |>
+    NetworkModules()
+limb_regulons = limb_regulons@meta |> filter(estimate > 0)
+pooled_regulons = bind_rows(eom_regulons, limb_regulons)
+
+eom_regulons = split(eom_regulons$target, eom_regulons$tf)
+limb_regulons = split(limb_regulons$target, limb_regulons$tf)
+pooled_regulons = split(pooled_regulons$target, pooled_regulons$tf)
+```
+
+```{r}
+regulons_df = GetNetwork(readRDS("results/pando/metacell_all.rds")) |>
+    find_modules(xgb_method = "tf") |>
+    NetworkModules()
+regulons_df = regulons_df@meta |> filter(estimate > 0)
+
+regulons = split(regulons_df$target, regulons_df$tf)
+```
+
+```{r}
+head(regulons_df)
+```
+
+```{r}
+regulons_df |> write_csv("results/pando/metacell_regulons.csv")
+```
+
+```{r}
+#p = 0.05
+#eom[["regulon"]] = CreateAssayObject(t(scale(t(cell_target_auc(eom, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p)))))
+#limb[["regulon"]] = CreateAssayObject(t(scale(t(cell_target_auc(limb, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p)))))
+#larynx[["regulon"]] = CreateAssayObject(t(scale(t(cell_target_auc(larynx, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p)))))
+```
+
+```{r}
+p = 0.05
+eom[["regulon"]] = CreateAssayObject(cell_target_auc(eom, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p))
+limb[["regulon"]] = CreateAssayObject(cell_target_auc(limb, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p))
+larynx[["regulon"]] = CreateAssayObject(cell_target_auc(larynx, regulons, gene_universe = unique(unlist(regulons)), partial_auc = p))
+```
+
+```{r}
+saveRDS(eom[["regulon"]], "srt/eom_regulons.rds")
+saveRDS(limb[["regulon"]], "srt/limb_regulons.rds")
+saveRDS(larynx[["regulon"]], "srt/larynx_regulons.rds")
+```
+
+## Top regulons - pure regulon activity
+
+```{r}
+source("differential_analysis.R")
+```
+
+```{r}
+genes_eom = rowMeans(LayerData(eom[["RNA"]], "counts") > 0)
+genes_eom = genes_eom[genes_eom>0.01]
+genes_limb = rowMeans(LayerData(limb[["RNA"]], "counts") > 0)
+genes_limb = genes_limb[genes_limb>0.01]
+genes_larynx = rowMeans(LayerData(larynx[["RNA"]], "counts") > 0)
+genes_larynx = genes_larynx[genes_larynx>0.01]
+```
+
+```{r}
+coi = c("Myh1","Myh2","Myh3","Myh4","Myh7b","NMJ","MTJ")
+```
+
+```{r}
+keep_cell = Idents(eom) %in% coi
+#dtfa_eom = MetaMarkers::compute_markers(ScaleData(GetAssayData(eom[["regulon"]])[, keep_cell]), cell_type_labels = Idents(eom)[keep_cell])
+dtfa_eom = MetaMarkers::compute_markers(GetAssayData(eom[["regulon"]])[, keep_cell], cell_type_labels = Idents(eom)[keep_cell])
+# FC = (average + 1) / (average_background + 1) -> average_background = (average+1)/FC - 1
+# avg_diff = average - average_background = average - (average+1)/FC + 1
+fc_pseudocount = 0.001
+dtfa_eom = mutate(dtfa_eom, avg_diff = average_expression - (average_expression+fc_pseudocount)/fold_change + fc_pseudocount)
+dtfa_eom = filter(dtfa_eom, gene %in% names(genes_eom))
+```
+
+```{r}
+keep_cell = limb$orig.ident == "Adult" & Idents(limb) %in% coi
+#dtfa_limb = MetaMarkers::compute_markers(ScaleData(GetAssayData(limb[["regulon"]])[, keep_cell]), cell_type_labels = Idents(limb)[keep_cell])
+dtfa_limb = MetaMarkers::compute_markers(GetAssayData(limb[["regulon"]])[, keep_cell], cell_type_labels = Idents(limb)[keep_cell])
+# FC = (average + 0.001) / (average_background + 0.001) -> average_background = (average+0.001)/FC - 0.001
+# avg_diff = average - average_background = average - (average+0.001)/FC + 0.001
+fc_pseudocount = 0.001
+dtfa_limb = mutate(dtfa_limb, avg_diff = average_expression - (average_expression+fc_pseudocount)/fold_change + fc_pseudocount)
+dtfa_limb = filter(dtfa_limb, gene %in% names(genes_limb))
+```
+
+```{r}
+keep_cell = Idents(larynx) %in% coi
+#dtfa_larynx = MetaMarkers::compute_markers(ScaleData(GetAssayData(larynx[["regulon"]])[, keep_cell]), cell_type_labels = Idents(larynx)[keep_cell])
+dtfa_larynx = MetaMarkers::compute_markers(GetAssayData(larynx[["regulon"]])[, keep_cell], cell_type_labels = Idents(larynx)[keep_cell])
+# FC = (average + 0.001) / (average_background + 0.001) -> average_background = (average+0.001)/FC - 0.001
+# avg_diff = average - average_background = average - (average+0.001)/FC + 0.001
+fc_pseudocount = 0.001
+dtfa_larynx = mutate(dtfa_larynx, avg_diff = average_expression - (average_expression+fc_pseudocount)/fold_change + fc_pseudocount)
+dtfa_larynx = filter(dtfa_larynx, gene %in% names(genes_larynx))
+```
+
+```{r}
+dtfa_eom |>
+    filter(auroc>0.8, population_size > 10, avg_diff > 0, average_expression>0) |>
+    ggplot(aes(x=avg_diff, y=auroc)) +
+    geom_text(aes(label=gene)) +
+    facet_wrap(~ cell_type)
+```
+
+```{r}
+dtfa_limb |>
+    filter(auroc>0.8, population_size > 10, avg_diff > 0, average_expression>0) |>
+    ggplot(aes(x=avg_diff, y=auroc)) +
+    geom_text(aes(label=gene)) +
+    facet_wrap(~ cell_type)
+```
+
+```{r}
+dtfa_larynx |>
+    filter(auroc>0.8, population_size > 10, avg_diff > 0, average_expression>0) |>
+    ggplot(aes(x=avg_diff, y=auroc)) +
+    geom_text(aes(label=gene)) +
+    facet_wrap(~ cell_type)
+```
+
+```{r}
+top_eom = dtfa_eom |>
+    filter(average_expression>0) |>
+    slice_max(auroc, n = 3, by = cell_type)
+```
+
+```{r}
+top_limb = dtfa_limb |>
+    filter(average_expression>0) |>
+    slice_max(auroc, n = 3, by = cell_type)
+```
+
+```{r}
+top_larynx = dtfa_larynx |>
+    filter(average_expression>0) |>
+    slice_max(auroc, n = 3, by = cell_type)
+```
+
+```{r}
+top_regulons = bind_rows(list(eom=top_eom, limb=top_limb, larynx = top_larynx), .id = "dataset") |>
+    select(dataset, cell_type, gene, auroc, avg_diff) |>
+    add_row(dataset = "larynx", cell_type = "Myh4", gene = "Tbx15", auroc=0.5, avg_diff=1) |>
+    slice_max(avg_diff, n=1, by=gene) # attribute regulon to cell type with largest difference
+```
+
+```{r}
+ct_order = c(
+    'eom|Myh1'="EOM Myh1",'limb|Myh1'="Limb Myh1",'larynx|Myh1'="Larynx Myh1",
+    'eom|Myh2'="EOM Myh2",'limb|Myh2'="Limb Myh2",'larynx|Myh2'="Larynx Myh2",
+    'eom|Myh4'="EOM Myh4",'limb|Myh4'="Limb Myh4","larynx|Myh4"="Larynx Myh4",
+    'eom|Myh3'="EOM Myh3",
+    'eom|Myh7b'="EOM Myh7b",'limb|Myh7b'="Limb Myh7b",
+    'eom|MTJ'="EOM MTJ", 'limb|MTJ'="Limb MTJ", "larynx|MTJ"="Larynx MTJ",
+    'eom|NMJ'="EOM NMJ", 'limb|NMJ'="Limb NMJ", "larynx|NMJ"="Larynx NMJ"
+)
+```
+
+```{r}
+regulon_order = top_regulons |>
+    mutate(cell_type = paste(dataset, cell_type, sep="|")) |>
+    mutate(cell_type = factor(ct_order[cell_type], ct_order)) |>
+    arrange(cell_type, desc(auroc)) |>
+    pull(gene) |>
+    unique()
+```
+
+```{r}
+to_plot = bind_rows(list(eom=dtfa_eom, limb=dtfa_limb, larynx = dtfa_larynx), .id = "dataset") |>
+    filter(gene %in% top_regulons$gene, cell_type %in% top_regulons$cell_type) |>
+    transmute(cell_type = paste(dataset, cell_type, sep="|"), regulon=gene, auroc, log_fdr, activity=average_expression, avg_diff)|>
+    mutate(regulon = factor(regulon, rev(regulon_order)), cell_type = factor(ct_order[cell_type], ct_order))
+```
+
+```{r}
+options(repr.plot.width=30/3, repr.plot.height=30/3)
+to_plot |>
+    mutate(activity = activity / max(activity), .by = "regulon") |>
+    ggplot(aes(x=cell_type,y=regulon)) +
+    geom_point(aes(col=activity, size=avg_diff)) +
+    scale_color_gradient2(limits=c(0,NA), oob=scales::squish, breaks=c(0,1), labels=c("0","max")) +
+    scale_size_area(max_size = 10, limits=c(0,NA), oob=scales::squish) +
+    #scale_radius(range = c(0,10), limits=c(0,5)) +
+    theme(axis.text.x = element_text(angle=45, hjust=1)) #+
+    #facet_wrap(~dataset, scales="free_x")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+to_plot |> write_csv("results/pando/metacell_top_regulons.csv")
+```
+
+```{r}
+#ggsave("fig/glenda/top_regulons.pdf", width = 30/3, height = 30/3)
+```
+
+## UMAP of key regulons
+
+```{r}
+eom[["sregulon"]] = CreateAssayObject(smooth_data(eom, assay_name = "regulon", graph_name = "RNA_nn"))
+limb[["sregulon"]] = CreateAssayObject(smooth_data(limb, assay_name = "regulon", graph_name = "RNA_nn"))
+larynx[["sregulon"]] = CreateAssayObject(smooth_data(larynx, assay_name = "regulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+eom[["tfregulon"]] = CreateAssayObject(rowRanks(as.matrix(LayerData(eom[["regulon"]]))) * LayerData(eom[["RNA"]])[rownames(eom[["regulon"]]),] / ncol(eom))
+eom[["tfregulon"]] = CreateAssayObject(smooth_data(eom, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+limb[["tfregulon"]] = CreateAssayObject(rowRanks(as.matrix(LayerData(limb[["regulon"]]))) * LayerData(limb[["RNA"]])[rownames(limb[["regulon"]]),] / ncol(limb))
+limb[["tfregulon"]] = CreateAssayObject(smooth_data(limb, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+larynx[["tfregulon"]] = CreateAssayObject(rowRanks(as.matrix(LayerData(larynx[["regulon"]]))) * LayerData(larynx[["RNA"]])[rownames(larynx[["regulon"]]),] / ncol(larynx))
+larynx[["tfregulon"]] = CreateAssayObject(smooth_data(larynx, assay_name = "tfregulon", graph_name = "RNA_nn"))
+```
+
+```{r}
+options(repr.plot.width = 60/3)
+```
+
+```{r}
+# MAF, Barx2, Pitx2, Tbx15 ? And also a UMAP for Mybphl, Pitx2, Tbx15?
+p = lapply(c("Lmx1a","Maf", "Tbx15","Mafb"), function(my_tf) {
+    my_reg = glue::glue("tfregulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff)) & NoAxes()
+})
+#pdf(glue::glue("fig/glenda/umap_regulon_examples.pdf"), width = 40/3)
+#print(p)
+#dev.off()
+```
+
+```{r}
+p
+```
+
+```{r}
+# MAF, Barx2, Pitx2, Tbx15 ? And also a UMAP for Mybphl, Pitx2, Tbx15?
+p = lapply(c("Lmx1a","Maf", "Tbx15","Mafb"), function(my_tf) {
+    my_reg = glue::glue("sregulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff), oob = scales::squish) & NoAxes()
+})
+#pdf(glue::glue("fig/glenda/umap_regulon_examples.pdf"), width = 40/3)
+#print(p)
+#dev.off()
+```
+
+```{r}
+p
+```
+
+```{r}
+# MAF, Barx2, Pitx2, Tbx15 ? And also a UMAP for Mybphl, Pitx2, Tbx15?
+p = lapply(c("Lmx1a","Maf","Tbx15","Mafb"), function(my_tf) {
+    my_reg = glue::glue("regulon_{my_tf}")
+    max_cutoff = max(
+        SetQuantile("q95", FetchData(eom, my_reg)),
+        SetQuantile("q95", FetchData(limb, my_reg)),
+        SetQuantile("q95", FetchData(larynx, my_reg))
+    )
+    p1 = FeaturePlot(eom, my_reg, max.cutoff = max_cutoff)
+    p2 = FeaturePlot(limb, my_reg, max.cutoff = max_cutoff)
+    p3 = FeaturePlot(larynx, my_reg, max.cutoff = max_cutoff)
+    (p1|p2|p3) & scale_color_distiller(palette = "RdYlBu", limits=c(0,max_cutoff)) & NoAxes()
+})
+#pdf(glue::glue("fig/glenda/umap_regulon_examples.pdf"), width = 40/3)
+#print(p)
+#dev.off()
+```
+
+```{r}
+p
+```
+
+```{r}
+options(repr.plot.width=20/3)
+```
+
+```{r}
+
+```

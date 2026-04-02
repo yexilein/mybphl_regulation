@@ -1,0 +1,959 @@
+---
+jupyter:
+  jupytext:
+    formats: ipynb,Rmd
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: R
+    language: R
+    name: ir
+---
+
+```{r}
+library(tidyverse)
+source("dataset.R")
+source("grn.R")
+```
+
+```{r}
+theme_set(theme_classic(base_size=16))
+```
+
+# Load data
+
+```{r}
+eom = load_tissue("eom")
+```
+
+```{r}
+limb = load_tissue("limb")
+```
+
+```{r}
+larynx = load_tissue("larynx")
+```
+
+```{r}
+mc = load_metacells()
+Idents(mc) = "tissue"
+```
+
+```{r}
+mc = mc[, mc$n_cells >= 5]
+```
+
+```{r}
+pb = load_pseudobulk()
+```
+
+```{r}
+Idents(pb) = "orig.ident"
+```
+
+```{r}
+gc()
+```
+
+```{r}
+total_coverage = function(my_peaks) {
+    gr = StringToGRanges(my_peaks)
+    c = GenomicRanges::seqnames(gr)[1]
+    m = min(IRanges::start(gr))
+    M = max(IRanges::end(gr))
+    return(glue::glue("{c}-{m}-{M}"))
+}
+```
+
+```{r}
+my_cov_plot = function(results, my_gene, my_tfs, extend_by=1000) {
+    my_peaks = results |> pull(peak) |> unique()
+    roi = StringToGRanges(total_coverage(my_peaks))
+    roi = Extend(roi, upstream = extend_by, downstream = extend_by)
+    roi = GRangesToString(roi)
+    
+    p1 = CoveragePlot(eom, assay="ATAC", roi, region.highlight = StringToGRanges(my_peaks), peaks = FALSE, annotation = FALSE)
+    p1b = ExpressionPlot(eom, features = c(my_gene, my_tfs))
+    p1 = patchwork::wrap_plots(p1, p1b, widths=c(10,length(my_tfs)+1))
+    
+    p2 = CoveragePlot(limb, assay="ATAC", roi, region.highlight = StringToGRanges(my_peaks), peaks = FALSE, annotation = FALSE)
+    p2b = ExpressionPlot(limb, features = c(my_gene, my_tfs))
+    p2 = patchwork::wrap_plots(p2, p2b, widths=c(10,length(my_tfs)+1))
+
+    p3 = CoveragePlot(larynx, assay="ATAC", roi, region.highlight = StringToGRanges(my_peaks), peaks = FALSE, annotation = FALSE)
+    p3b = ExpressionPlot(larynx, features = c(my_gene, my_tfs))
+
+    #plot_binding_sites = function(tf_name) {
+    p4 = lapply(my_tfs, function(tf_name) {
+        binding_sites = results |> filter(tf == tf_name, !is.na(motif_score)) |> pull(peak)
+        empty_srt = CreateSeuratObject(
+            CreateChromatinAssay(counts = matrix(0, length(my_peaks), 2, dimnames = list(my_peaks,c("mi","mou")))), assay="ATAC"
+        )
+        empty_srt[["ATAC"]][[tf_name]] = rownames(empty_srt) %in% binding_sites
+        PeakPlot(empty_srt, assay="ATAC", roi, group.by = tf_name) +
+            scale_color_manual(values = c("TRUE"="brown2","FALSE"="gray80")) +
+            guides(col = "none") +
+            labs(y=tf_name) +
+            theme(axis.title.y = element_text(angle=0, vjust=0.5))
+    })
+    p4 = CombineTracks(p4, heights = rep(1, length(p4)))
+
+    p5 = AnnotationPlot(eom[["ATAC"]], roi)
+    
+    p3 = CombineTracks(list(p3,p4,p5), expression.plot = p3b, widths=c(10,length(my_tfs)+1), heights = c(10,length(my_tfs)/2,2))
+    p = patchwork::wrap_plots(p1, p2, p3, ncol=1, heights=c(10,10,10+2+length(my_tfs)/2))
+    return(p)
+}
+```
+
+# Make local GRN
+
+```{r}
+my_targets = c("Mybpc1","Mybpc2","Mybphl")
+```
+
+```{r}
+# find top enhancers around target
+my_ccres = read_csv(glue::glue("results/grn/ccres.csv.gz"), show_col_types = FALSE) |>
+        filter(target %in% c(my_targets))
+```
+
+```{r}
+tf_ccre = readRDS(glue::glue("results/grn/tf_ccre.rds"))
+```
+
+```{r}
+# find best regulators around enhancers
+make_local_grn = function(my_ccres) {
+    tf_ccre = readRDS(glue::glue("results/grn/tf_ccre.rds")) |>
+        filter(peak %in% my_ccres$peak_id) |>
+        transmute(peak, tf, tf_peak_pooled = pooled_mc, tf_peak_within = (eom_mc + limb_mc + larynx_mc)/3, tf_peak_z = tf_z)
+    
+    # keep only best match for TFs with multiple motifs
+    motif_score = read_csv(glue::glue("results/grn/motifs.csv.gz"), show_col_types = FALSE)
+    motif_score = motif_score |> filter(1:n() == which.max(motif_score), .by = c("tf", "region"))
+    tf_ccre = tf_ccre |>
+        left_join(motif_score,  by=c("peak"="region","tf"))
+    
+    cv_ccre = readRDS(glue::glue("results/grn/cv_ccre.rds")) |>
+        filter(peak %in% my_ccres$peak_id) |>
+        transmute(peak, tf, cv_peak_pooled = pooled_chromvar_mc, cv_peak_within = (eom_chromvar_mc + limb_chromvar_mc + larynx_chromvar_mc)/3, cv_peak_z = chromvar_z)
+    
+    tf_target = readRDS(glue::glue("results/grn/tf_target.rds")) |>
+        transmute(tf, target, tf_target_pooled = pooled_mc, tf_target_within = (eom_mc + limb_mc + larynx_mc)/3, tf_target_z = tf_z)
+    
+    #pando_results = readRDS(glue::glue("results/pando/metacell_all{stage_suffix}.rds"))
+    #pando_results = coef(pando_results) |> dplyr::select(tf, target, peak=region, pando_score=gain)
+    
+    grn = tf_ccre |>
+        inner_join(my_ccres, by=c("peak"="peak_id"), relationship = "many-to-many") |>
+        left_join(cv_ccre, by=c("peak","tf")) |>
+        left_join(tf_target, by = c("tf", "target")) #|>
+    #    left_join(pando_results, by = c("peak", "tf", "target"))
+
+    # add basic gene information
+    gene_stats = read_csv(glue::glue("results/grn/gene_stats.csv.gz"), show_col_types = FALSE)
+    gene_stats$is_tf = gene_stats$gene %in% all_tfs()
+    gene_stats = summarize(gene_stats, pct = mean(pct), avg = mean(avg), is_tf = dplyr::first(is_tf), .by = "gene")
+    jaspar_tfs = add_tf_name(tibble(motif=names(jaspar_pfm())), jaspar_pfm()) |> pull(tf) |> unique() |> intersect(all_tfs())
+    grn = left_join(grn, gene_stats, by = c("tf"="gene"))|>
+        mutate(has_motif = tf %in% jaspar_tfs)
+    return(grn)
+}
+```
+
+```{r}
+cache_file = "results/mybp_regulators.csv.gz"
+if (file.exists(cache_file)) {
+    grn = read_csv(cache_file, show_col_types = FALSE)
+} else {
+    grn = make_local_grn(my_ccres)
+    write_csv(grn, cache_file)
+}
+```
+
+```{r}
+gc()
+```
+
+# Mybphl
+
+```{r}
+my_gene = "Mybphl"
+my_tfs = c("Tbx15","Maf","Mafb")
+```
+
+```{r}
+results = filter(grn, target == my_gene, zscore>0) |> arrange(peak)
+```
+
+```{r}
+my_ccres |> filter(target == my_gene) |> arrange(peak_id)
+```
+
+```{r}
+p_track = my_cov_plot(results, my_gene, my_tfs)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+proximal_peaks = filter(results, gene_distance<=2e4, zscore>2.5)
+distal_peaks = filter(results, gene_distance>2e4, gene_distance == tss_distance, pct_peak<0.15, zscore>2 | score>0.05)
+```
+
+```{r}
+p_track = my_cov_plot(proximal_peaks, my_gene, my_tfs)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+p_track2 = my_cov_plot(distal_peaks, my_gene, my_tfs, extend_by = 5000)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track2
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Proximal peaks
+
+```{r}
+topn = 10
+my_height = 40/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    #mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(highlight = startsWith(tf, "Maf") | startsWith(tf, "Tbx"), .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+topn = 10
+my_height = 40/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    #mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(highlight = startsWith(tf, "Maf") | startsWith(tf, "Tbx"), .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=cv_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Motif-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10"))
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    #mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(highlight = startsWith(tf, "Maf") | startsWith(tf, "Tbx"), .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(proximal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Mafb", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Mafb","Tbx15")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Mafb + Tbx15")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Follow-up proximal peak: location of Maf binding site
+
+```{r}
+my_peak = sort(unique(proximal_peaks$peak))[3]
+my_peak
+```
+
+```{r}
+pfm=jaspar_pfm()[sapply(jaspar_pfm(), \(p) p@name) == "MAF"]
+p.cutoff=1e-3
+genome = BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10
+```
+
+```{r}
+result = motifmatchr::matchMotifs(pwms = pfm, subject = StringToGRanges(my_peak), out="position", genome = genome, bg="genome", p.cutoff=p.cutoff)
+#result = motifmatchr::motifScores(result)
+```
+
+```{r}
+result
+```
+
+```{r}
+options(repr.plot.width=30/3)
+CoveragePlot(eom, assay="ATAC", my_peak, features = c("Mybpc2","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+CoveragePlot(limb, assay="ATAC", my_peak, features = c("Mybpc2","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+CoveragePlot(larynx, assay="ATAC", my_peak, features = c("Mybpc2","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+my_peak = sort(unique(proximal_peaks$peak))[2]
+my_peak
+```
+
+```{r}
+pfm=jaspar_pfm()[sapply(jaspar_pfm(), \(p) p@name) == "MAF"]
+p.cutoff=5e-3
+genome = BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10
+```
+
+```{r}
+result = motifmatchr::matchMotifs(pwms = pfm, subject = StringToGRanges(my_peak), out="position", genome = genome, bg="genome", p.cutoff=p.cutoff)
+#result = motifmatchr::motifScores(result)
+```
+
+```{r}
+result
+```
+
+```{r}
+options(repr.plot.width=30/3)
+CoveragePlot(eom, assay="ATAC", my_peak, features = c("Mybphl","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+CoveragePlot(limb, assay="ATAC", my_peak, features = c("Mybphl","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+CoveragePlot(larynx, assay="ATAC", my_peak, features = c("Mybphl","Maf"), region.highlight = result[[1]], extend.upstream = 1000, extend.downstream = 1000)
+options(repr.plot.width=20/3)
+```
+
+## Distal peaks
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = distal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Distal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = distal_peaks |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(distal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Maf","Tbx15")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Maf + Tbx15")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tfeb", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+# Mybpc2
+
+
+## Positive regulators
+
+```{r}
+my_gene = "Mybpc2"
+my_tfs = c("Kcnc3","Tbx15","Maf","Mafb")
+```
+
+```{r}
+results = filter(grn, target == my_gene, zscore>0) |> arrange(peak)
+```
+
+```{r}
+my_ccres |> filter(target == my_gene) |> arrange(peak_id)
+```
+
+```{r}
+my_peaks = results |> pull(peak) |> unique()
+p = lapply(list(eom, limb, larynx), function(srt) {
+    CoveragePlot(srt, assay="ATAC", total_coverage(my_peaks), region.highlight = StringToGRanges(my_peaks), features = c(my_gene, my_tfs), extend.upstream = 1000, extend.downstream = 1000)
+})
+options(repr.plot.width=60/3)
+p
+options(repr.plot.width=20/3)
+```
+
+```{r}
+proximal_peaks = filter(results, gene_distance<=2e4, pct_peak>0.03, n>1)
+distal_peaks = filter(results, gene_distance>2e4, pct_peak>0.02, n>1, zscore>2)
+```
+
+```{r}
+p_track = my_cov_plot(proximal_peaks, my_gene, my_tfs)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+p_track2 = my_cov_plot(distal_peaks, my_gene, my_tfs, extend_by = 5000)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track2
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Proximal peaks
+
+```{r}
+topn = 10
+my_height = 40/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn | tf %in% c("Maf","Mafb"), .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(proximal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Mafb", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Thrb", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Maf","Tbx15")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Maf + Tbx15")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Maf","Mafb")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Maf + Mafb")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+### Follow-up proximal peak: location of Maf binding site
+
+```{r}
+find_motif_position = function(tf, peaks, p.cutoff=1e-3, genome = BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10) {
+    pfm=jaspar_pfm()[sapply(jaspar_pfm(), \(p) p@name) %in% toupper(my_tfs)]
+    result = motifmatchr::matchMotifs(pwms = pfm, subject = StringToGRanges(peaks), out="position", genome = genome, bg="genome", p.cutoff=p.cutoff)
+    result = bind_rows(lapply(result, as_tibble), .id = "motif")
+    if (nrow(result) > 0) {
+        result$pval = score_to_pval(pfm, result$score)
+    }
+    result = GenomicRanges::GRanges(result)
+    return(result)
+}
+
+score_to_pval = function(pfm, score) {
+    pwms = do.call(TFBSTools::PWMatrixList, lapply(pfm, TFBSTools::toPWM))
+    bg = motifmatchr:::get_bg(bg_method="genome", subject=NULL, genome=BSgenome.Mmusculus.UCSC.mm10::BSgenome.Mmusculus.UCSC.mm10)
+    motif_mats <- motifmatchr:::convert_pwms(pwms, bg)
+    my_pval = sort(c(c(1:9)*10**(-3), c(1:9)*10**(-4), c(1:9)*10**(-5)))
+    pvals = tibble(
+        pval = my_pval,
+        score = sapply(my_pval, \(p) { motifmatchr:::get_thresholds(mats = motif_mats, nuc_freqs = bg, p)[1] })
+    )
+    result = sapply(score, \(s) { pvals$pval[which(pvals$score<s)[1]] })
+    return(result)
+}
+```
+
+```{r}
+my_peak = unique(proximal_peaks$peak)[2]
+result = find_motif_position("Maf", my_peak, p.cutoff = 5e-3)
+```
+
+```{r}
+result
+```
+
+```{r}
+options(repr.plot.width=30/3)
+CoveragePlot(eom, assay="ATAC", my_peak, region.highlight = result, extend.downstream = 100, extend.upstream = 100)
+CoveragePlot(limb, assay="ATAC", my_peak, region.highlight = result, extend.downstream = 100, extend.upstream = 100)
+CoveragePlot(larynx, assay="ATAC", my_peak, region.highlight = result, extend.downstream = 100, extend.upstream = 100)
+options(repr.plot.width=20/3)
+```
+
+```{r}
+eom_peak = rownames(eom[["ATAC"]])[overlapsAny(granges(eom[["ATAC"]]), StringToGRanges(unique(proximal_peaks$peak)))]
+```
+
+```{r}
+DotPlot(eom, features=eom_peak, assay="ATAC") + RotatedAxis()
+```
+
+## Distal peaks
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = distal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Distal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = distal_peaks |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(distal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Maf", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Maf","Tbx15")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Maf + Tbx15")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tfeb", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Coverage peaks
+
+```{r}
+my_coord = Signac:::LookupGeneCoords(eom, "Mybpc2", assay = "ATAC")
+```
+
+```{r}
+my_coord = GRanges(seqnames = seqnames(my_coord), ranges = start(my_coord))
+```
+
+```{r}
+p = lapply(list(eom, limb, larynx), function(srt) {
+    CoveragePlot(srt, assay="ATAC", my_coord, features = c(my_gene, my_tfs), extend.upstream = 20000, extend.downstream = 1000)
+})
+options(repr.plot.width=60/3)
+p
+options(repr.plot.width=20/3)
+```
+
+# Mybpc1
+
+```{r}
+my_gene = "Mybpc1"
+my_tfs = c("Tbx15","Maf","Ppara","Nfat5")
+```
+
+```{r}
+results = filter(grn, target == my_gene, zscore>0) |> arrange(peak)
+```
+
+```{r}
+my_ccres |> filter(target == my_gene) |> arrange(peak_id)
+```
+
+```{r}
+my_peaks = results |> pull(peak) |> unique()
+p = lapply(list(eom, limb, larynx), function(srt) {
+    CoveragePlot(srt, assay="ATAC", total_coverage(my_peaks), region.highlight = StringToGRanges(my_peaks), features = c(my_gene, my_tfs), extend.upstream = 1000, extend.downstream = 1000)
+})
+options(repr.plot.width=60/3)
+p
+options(repr.plot.width=20/3)
+```
+
+```{r}
+proximal_peaks = filter(results, gene_distance<=2e4, pct_peak>0.03, n>1, zscore>2)
+distal_peaks = filter(results, gene_distance>2e4, pct_peak>0.02, zscore>2)
+```
+
+```{r}
+p_track = my_cov_plot(proximal_peaks, my_gene, my_tfs)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+p_track2 = my_cov_plot(distal_peaks, my_gene, my_tfs, extend_by = 5000)
+```
+
+```{r}
+options(repr.plot.width=60/3, repr.plot.height=40/3)
+p_track2
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Proximal peaks
+
+```{r}
+my_ccres |> filter(target == my_gene, peak_id %in% proximal_peaks$peak) |> arrange(peak_id)
+```
+
+```{r}
+topn = 10
+my_height = 30/3
+my_width=40/3
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn | tf %in% c("Maf","Mafb"), .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Proximal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = proximal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn | rank(-tf_peak_z) < topn, .by = "peak") |>
+    ggplot(aes(x=tf_peak_z,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(proximal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Ppara", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Nfat5", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+mc$my_sum = rowSums(FetchData(mc, c("Ppara","Nfat5")))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "my_sum", p)), nrow = nrow) & labs(x="Ppara + Nfat5")
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+## Distal peaks
+
+```{r}
+topn = 10
+my_height = 20/3
+my_width=40/3
+to_highlight = "Tbx15"
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_1 = distal_peaks |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn | tf %in% to_highlight, .by = "peak") |>
+    ggplot(aes(x=tf_peak_within,y=tf_peak_pooled, col=strong_motif)) +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (within tissues, metacell-level)", y="TF-peak correlation (across tissues, metacell-level)",col = "strong_motif", title = "Distal peaks") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_1
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+options(repr.plot.width=my_width, repr.plot.height=my_height)
+p_score = distal_peaks |>
+    mutate(my_score = ifelse(is.na(motif_score), 2*runif(n())-1, -log10(motif_pval))) |>
+    mutate(highlight = rank(-tf_peak_within) < topn | rank(-tf_peak_pooled) < topn, .by = "peak") |>
+    mutate(strong_motif = ifelse(has_motif, !is.na(motif_score), NA)) |>
+    ggplot(aes(x=tf_peak_pooled,y=my_score, col=strong_motif)) +
+    geom_hline(yintercept = -log10(1e-3), linetype = "dashed") +
+    geom_point(size=0.1) + 
+    ggrepel::geom_text_repel(data = . %>% filter(highlight), aes(label=tf), max.overlaps = Inf) +
+    facet_wrap(~ peak) +
+    labs(x="TF-peak correlation (across tissues, metacell-level)", y="Best motif score (-log10(p-value))") +
+    scale_color_manual(values = c("TRUE"="brown3","FALSE"="gray10")) +
+    coord_flip()
+p_score
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+all_peaks = sort(unique(distal_peaks$peak))
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Nfat5", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Nr4a1", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+ncol = ceiling(sqrt(length(all_peaks)))
+nrow = ceiling(length(all_peaks)/ncol)
+options(repr.plot.width=ncol*15/3, repr.plot.height=nrow*15/3)
+patchwork::wrap_plots(lapply(all_peaks, \(p) FeatureScatter(mc, "Tbx15", p)), nrow = nrow)
+options(repr.plot.width=20/3, repr.plot.height=20/3)
+```
+
+```{r}
+
+```

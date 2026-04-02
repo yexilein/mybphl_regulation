@@ -1,0 +1,5 @@
+# Inferrence of Mybphl regulation from single-cell multi-ome datasets
+
+This repository contains the code used for analysis and figure generation for the manuscript "A common genetic program accelerates relaxation kinetics in mammalian superfast muscles". There are two subdirectories:
+ - comparative_analysis contains the code used for the GRN inference from uniformly processed single-cell multiome data. The pipeline includes the harmonization of peaks across datasets, the computation of metacells, initiation of the GRN using linear methods (accessibility-corrected Spearman correlation), the computation of regulons using non-linear methods (Pando with XGB algorithm). It also contains notebooks with the exploration and preliminary visualizations for our target genes of interest.
+ - manuscript_figures contains the notebooks used to finalize the visualizations used in the manuscript (adaptations of the notebooks used in the comparative_analysis).

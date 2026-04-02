@@ -1,0 +1,9 @@
+
+*.ipynb
+*.html
+
+.DS_store
+.ipynb_checkpoints
+
+preliminary
+

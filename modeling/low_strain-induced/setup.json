@@ -1,0 +1,36 @@
+{
+  "FiberSim_setup":
+  {
+    "FiberCpp_exe": {
+      "relative_to": "this_file",
+      "exe_file": "../../../../bin/FiberCpp.exe"
+    },
+    "model": {
+      "relative_to": "this_file",
+      "options_file": "sim_options.json",
+      "model_files": ["model.json"]
+    },
+    "characterization": [
+        {
+            "type": "pCa_length_control",
+            "relative_to": "this_file",
+            "sim_folder": "../sim_data",
+            "m_n": 4,
+            "pCa_values": [4.5],
+            "sim_duration_s": 12.5,
+            "time_step_s": 0.005,
+            "pCa_step_up_s": 0.55,
+            "pCa_step_down_s": 10.55,
+            "k_tr_duration_s": 0.01,
+            "k_tr_start_s": 5.55,
+            "k_tr_ramp_s": 0.001,
+            "k_tr_magnitude_nm": 61,
+            "k_tr_fit_time_s": [0.723, 1.39],
+            "output_image_formats": [ "png" ],
+            "figures_only": "False",
+            "trace_figures_on": "False",
+            "post_sim_Python_call": "../Python_code/plot_myosin_isotypes.py"
+        }
+    ]
+  }
+}
